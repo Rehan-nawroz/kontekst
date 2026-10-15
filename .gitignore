@@ -15,3 +15,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# AI chat export main folder (already has its own repo structure)
+ai-chat-export-main/
