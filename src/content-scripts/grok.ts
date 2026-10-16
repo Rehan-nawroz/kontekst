@@ -298,6 +298,8 @@ function initGrokSelection(): void {
       return true;
     }
   });
+}
+
 // ────── data extraction for export ─────────── */
 
 function extractGrokData(): Record<string, unknown> {
