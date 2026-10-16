@@ -1,3 +1,5 @@
+export {};
+
 /**
  * Content script for Claude conversations — DOM selection & checkbox UI injection.
  */
@@ -9,7 +11,7 @@ const excludedMessageIds = new Set<string>();
 let enabled = false;
 let selectAllMode = true;
 let anchorIndex: number | null = null;
-let observer: ReturnType<typeof MutationObserver> | null = null;
+let observer: MutationObserver | null = null;
 let refreshQueued = false;
 
 // Row IDs use the "claude-index:" namespace for disambiguation.
@@ -24,7 +26,7 @@ function conversationId(): string | null {
 
 /** Find every visible transcript row that the user can select individually. */
 function rows(): Array<{ row: HTMLElement; index: number }> {
-  return [...document.querySelectorAll('[data-testid="transcript-row"][data-index]')]
+  return [...document.querySelectorAll<HTMLElement>('[data-testid="transcript-row"][data-index]')]
     .map(row => ({
       row,
       index: Number(row.getAttribute('data-index')) || -1,
@@ -277,7 +279,7 @@ async function extractClaudeData(): Promise<Record<string, unknown>> {
     if (!textContent) continue;
 
     // Determine user vs assistant by Claude's role markers.
-    const isUser = /human|user/i.test(row.getAttribute('data-testid') || '').length > 0;
+    const isUser = /human|user/i.test(row.getAttribute('data-testid') || '');
     messages.push({
       role: isUser ? 'user' : 'assistant',
       content: article.innerHTML,
