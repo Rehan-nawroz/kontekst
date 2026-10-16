@@ -1,4 +1,5 @@
-import { createElement, FormEvent, useCallback, useState } from 'preact';
+import { createElement } from 'preact';
+import { useCallback, useState } from 'preact/hooks';
 
 interface MessageData {
   success: boolean;
@@ -43,9 +44,9 @@ export function App() {
         ],
       });
 
-      const result = await chrome.tabs.sendMessage<MessageData>(tab.id, {
+      const result = (await chrome.tabs.sendMessage(tab.id, {
         type: 'kontext:extract',
-      });
+      })) as MessageData;
 
       if (!result?.success) throw new Error('Extraction failed.');
 
