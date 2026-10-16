@@ -1,3 +1,5 @@
+export {};
+
 /**
  * Content script for Grok conversations — DOM selection & checkbox UI injection.
  */
@@ -9,7 +11,7 @@ const excludedMessageIds = new Set<string>();
 let enabled = false;
 let selectAllMode = true;
 let anchorId: string | null = null;
-let observer: ReturnType<typeof MutationObserver> | null = null;
+let observer: MutationObserver | null = null;
 let refreshQueued = false;
 let orderedIds: string[] = [];
 let collecting: Promise<void> | null = null;
@@ -166,7 +168,7 @@ function refreshMounted(): void {
   for (const item of turnItems()) {
     if (enabled) addCheckbox(item);
     const box = item.turn.querySelector('.chatgpt-export-select');
-    if (box) {
+    if (box instanceof HTMLInputElement) {
       box.checked = isSelected(item.id);
       box.style.display = enabled ? 'block' : 'none';
     }
