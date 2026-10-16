@@ -1,7 +1,7 @@
-import { Message, Attachment } from '../core/types';
+import type { ContentBlock, Message } from '../core/types';
 
 export class MarkdownRenderer {
-  render(messages: Message[], attachments?: Attachment[]): string {
+  render(messages: Message[], attachments?: Message['attachments']): string {
     let markdown = '';
 
     // Add title header if needed
@@ -27,8 +27,8 @@ export class MarkdownRenderer {
     }
   }
 
-  private processContent(content: string): string {
+  private processContent(content: ContentBlock[]): string {
     // Process markdown-specific transformations here
-    return content;
+    return content.map(block => block.text).join('');
   }
 }
