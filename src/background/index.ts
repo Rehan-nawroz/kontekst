@@ -2,6 +2,8 @@
 import { ZipBuilder } from '../core/ZipBuilder';
 import { MarkdownRenderer } from '../renderers/Markdown';
 import { HtmlRenderer } from '../renderers/Html';
+import { ContentBlockType } from '../core/types';
+import type { Message } from '../core/types';
 
 // Set up popup messaging for the export flow
 chrome.action.onClicked.addListener(async (tab) => {
@@ -14,6 +16,7 @@ chrome.action.onClicked.addListener(async (tab) => {
   if (!isChatGPT && !isClaude) {
     chrome.notifications.create({
       type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
       title: 'Kontext',
       message: 'Please open a ChatGPT or Claude conversation page.',
     });
@@ -40,6 +43,7 @@ chrome.action.onClicked.addListener(async (tab) => {
   } catch (error) {
     chrome.notifications.create({
       type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
       title: 'Kontext',
       message: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
     });
@@ -53,6 +57,7 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
   if (messages.length === 0) {
     chrome.notifications.create({
       type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
       title: 'Kontext',
       message: 'No messages found in this conversation.',
     });
@@ -62,17 +67,25 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
   const zipBuilder = new ZipBuilder();
 
   // Add Markdown version
+  // Normalise the extraction output into the shared conversation schema.
+  const normalizedMessages: Message[] = messages.map((m, index) => ({
+    id: `message-${index}`,
+    parentId: index === 0 ? null : `message-${index - 1}`,
+    role: m.role === 'user' ? 'user' : 'assistant',
+    sourceRole: m.role,
+    createdAt: null,
+    model: null,
+    content: [{ type: ContentBlockType.Text, text: m.content, format: 'markdown' }],
+    attachments: [],
+  }));
+
   const mdRenderer = new MarkdownRenderer();
-  const markdownContent = mdRenderer.render(
-    messages.map(m => ({ id: m.role, role: m.role as any, content: m.content }))
-  );
+  const markdownContent = mdRenderer.render(normalizedMessages);
   zipBuilder.addFileSync('conversation.md', markdownContent);
 
   // Add HTML version
   const htmlRenderer = new HtmlRenderer();
-  const htmlContent = htmlRenderer.render(
-    messages.map(m => ({ id: m.role, role: m.role as any, content: m.content }))
-  );
+  const htmlContent = htmlRenderer.render(normalizedMessages);
   zipBuilder.addFileSync('conversation.html', htmlContent);
 
   // Generate and download the ZIP file
@@ -90,6 +103,7 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
 
   chrome.notifications.create({
     type: 'basic',
+    iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
     title: 'Kontext',
     message: `${messages.length} messages exported successfully!`,
   });
