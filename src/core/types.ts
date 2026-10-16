@@ -9,9 +9,10 @@
 
 /** Supported source platforms for exported conversations. */
 export enum Platform {
-  ChatGPT = "chatgpt",
-  Claude  = "claude",
-  DeepSeek = "deepseek"
+  ChatGPT  = "chatgpt",
+  Claude   = "claude",
+  DeepSeek = "deepseek",
+  Grok     = "grok"
 }
 
 /** Discriminant used by every ContentBlock variant. */
@@ -67,7 +68,8 @@ export interface Message {
 
   /** Attachments referenced by or accompanying this message. */
   attachments: (ChatGPTAttachment | ClaudeRemoteImageAttachment | ClaudeLocalResourceAttachment |
-                 CloudflareClaudeAttachment | DeepSeekUserFileAttachment | DeepSeekExternalImageAttachment)[];
+                  CloudflareClaudeAttachment | DeepSeekUserFileAttachment | DeepSeekExternalImageAttachment |
+                  GrokUserAssetAttachment)[];
 
   /** true when every message preceding this one was ommitted in the source data. */
   omittedBefore?: boolean;
@@ -157,4 +159,15 @@ export interface DeepSeekExternalImageAttachment {
   title: string;
   mimeType: "application/octet-stream";
   isImage: true;
+}
+
+/** Grok user-uploaded asset attachment (user-assets). */
+export interface GrokUserAssetAttachment {
+  source: "grok-user-asset";
+  id: string;
+  assetId: string;
+  originalName: string | null;
+  title: string | null;
+  mimeType: string;
+  isImage: boolean;
 }
