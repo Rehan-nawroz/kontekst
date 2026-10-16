@@ -1,25 +1,84 @@
-import { BaseExtractor } from './BaseExtractor';
-import { Platform, Message, Conversation, ContentBlockType } from '../core/types';
-import { HttpClient } from '../core/HttpClient';
+/**
+ * ClaudeExtractor — fetches a claude.ai conversation through the site's
+ * internal backend API, captures custom SVG widgets rendered inside MCP
+ * iframes, and normalises the active message branch into the shared schema.
+ *
+ * Implementation pattern sourced from the reference normalisers:
+ *  - getClaudeConversationInPage + organization discovery → claude-api.js
+ *  - normalizeClaudeConversation + attachment helpers     → claude-normalize.js
+ *  - custom visual capture (visualize:show_widget)        → claude-visual-capture.js
+ */
 
-// ──────────────── internal types — Claude backend payloads ───────────────
+import { BaseExtractor } from './BaseExtractor';
+import { Platform, ContentBlockType } from '../core/types';
+import type {
+  Message,
+  ClaudeRemoteImageAttachment,
+  ClaudeLocalResourceAttachment,
+  CloudflareClaudeAttachment,
+} from '../core/types';
+
+/* ──────────────── internal types — Claude backend payloads ─────────────── */
 
 interface ClaudeChatMessage {
   uuid: string;
   parent_message_uuid?: string | null;
   sender?: string;
-  model?: string;
-  created_at?: number | string;
-  content: Array<ClaudeContentBlock>;
+  model?: string | null;
+  created_at?: number | string | null;
+  content?: ClaudeContentBlock[];
 }
 
+/** Raw shape returned by /api/organizations/<org>/chat_conversations/<id>. */
 interface ClaudeConversationPayload {
-  uuid: string;
+  uuid?: string;
   name?: string;
+  model?: string | null;
   chat_messages?: ClaudeChatMessage[];
-  current_leaf_message_uuid?: string;
-  model?: string;
-  role?: string;
+  current_leaf_message_uuid?: string | null;
+  /** Injected by the visual-capture pass (see claude-visual-capture.js). */
+  __customVisuals?: ClaudeCapturedVisual[];
+  /** Injected when the conversation is fetched with an organization scope. */
+  __organizationId?: string;
+  [key: string]: unknown;
+}
+
+/** One custom SVG widget recovered from an MCP iframe. */
+interface ClaudeCapturedVisual {
+  rowIndex: number;
+  visualIndex?: number;
+  svg: string;
+  width: number | null;
+  height: number | null;
+}
+
+/** A transcript row that is expected to render at least one custom visual. */
+interface ClaudeVisualTarget {
+  rowIndex: number;
+  count: number;
+}
+
+/** Omission metadata applied when only part of a conversation is exported. */
+interface ClaudeOmission {
+  beforeIds?: Set<string>;
+  omittedAtStart?: boolean;
+  omittedAtEnd?: boolean;
+}
+
+/** Page-world state shared between the visual-capture script injections. */
+interface ClaudeVisualPageState {
+  token: string;
+  targets: ClaudeVisualTarget[];
+  visuals: Map<string, ClaudeCapturedVisual>;
+  scrollPositions: Array<{ element: Element; left: number; top: number }>;
+  windowPosition: { left: number; top: number };
+  handler: ((event: MessageEvent) => void) | null;
+}
+
+/** Custom visual attachment carrying its inline SVG payload. */
+interface ClaudeCustomVisualAttachment extends CloudflareClaudeAttachment {
+  /** Non-enumerable SVG source, consumed by the attachment downloader. */
+  __inlineSvg?: string;
 }
 
 type ClaudeContentBlock =
@@ -40,7 +99,8 @@ interface ClaudeToolUseBlock {
 
 interface ClaudeToolResultBlock {
   type: 'tool_result';
-  content: Array<ClaudeContentItem>;
+  content?: ClaudeContentItem[];
+  name?: string;
 }
 
 type ClaudeContentItem =
@@ -57,276 +117,60 @@ interface ClaudeLocalResource {
 
 interface ClaudeImageGallery {
   type: 'image_gallery';
-  images: Array<{ url?: string; title?: string; id?: string; page_url?: string }>;
+  images?: ClaudeGalleryImage[];
 }
 
-// ──────────────── WebSocket event capture (from reference) ────────────────
-
-const WS_CAPTURE_KEY = '__kontekptExportClaudeWebSocketCaptureV3';
-const CAPTURE_TIMEOUT_MS = 60_000;
-
-/**
- * Inject code into the page to intercept all new WebSocket constructors,
- * capturing every frame's data and forwarding it via chrome.runtime.postMessage.
- * Pattern sourced from the reference API capture logic.
- */
-function injectWebSocketCapture(tabId: number): Promise<void> {
-  return chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'MAIN',
-    args: [WS_CAPTURE_KEY, CAPTURE_TIMEOUT_MS],
-    func: (registryKey: string, timeoutMs: number) => {
-      if ((globalThis as Record<string, unknown>)[registryKey]) return;
-
-      const capturedState: {
-        convCount: number;
-        msgsPerConv: Map<string, ClaudeChatMessage[]>;
-      } = {
-        convCount: 0,
-        msgsPerConv: new Map(),
-      };
-
-      // Snapshot existing connections.
-      function captureExistingWebSocket(url: string): void {
-        try {
-          const ws = new (window as unknown as Record<string, unknown> & { WebSocket: typeof WebSocket }).WebSocket(url) as WebSocket;
-          ws.addEventListener('message', (event: MessageEvent) => {
-            processFrame(event.data);
-          });
-        } catch {}
-      }
-
-      function processFrame(rawData: string): void {
-        if (typeof rawData !== 'string') return;
-        try {
-          const data = JSON.parse(rawData);
-          const updatePayload = transformUpdateToConversationState(data);
-          const convId = typeof updatePayload.uuid === 'string' ? updatePayload.uuid : '';
-          if (!convId) return;
-
-          const msgs = updatePayload.chat_messages || [];
-          for (const msg of msgs) {
-            if (!(msg && typeof msg === 'object')) continue;
-            const messageId = (msg.uuid as string);
-            if (messageId && messageIds.add(messageId)) {
-              capturedState.convCount++;
-              capturedState.msgsPerConv.set(convId, [...msgs]);
-              window.parent.postMessage({ type: registryKey + ':update', state: JSON.stringify(capturedState), payload: JSON.stringify(updatePayload) }, '*');
-            }
-          }
-
-          if (typeof updatePayload.current_leaf_message_uuid === 'string') {
-            capturedState.convCount++;
-            capturedState.msgsPerConv.set(convId, [...msgs]);
-            window.parent.postMessage({ type: registryKey + ':update', state: JSON.stringify(capturedState), payload: JSON.stringify(updatePayload) }, '*');
-          }
-
-          // Capture metadata changes on conversation object itself.
-          if ('uuid' in data && !('chat_messages' in data)) {
-            const convUpdate = convertRawUpdateToObject(data);
-            capturedState.convCount++;
-            window.parent.postMessage({ type: registryKey + ':update', state: JSON.stringify(capturedState), payload: JSON.stringify(convUpdate) }, '*');
-          }
-        } catch {}
-      }
-
-      const messageIds = new Set<string>();
-
-      function convertRawUpdateToObject(rawUpdate: Record<string, unknown>): { uuid?: string; name?: string; [k: string]: unknown } {
-        const result: { uuid?: string; name?: string; [k: string]: unknown } = {};
-        if ('uuid' in rawUpdate) result.uuid = String(rawUpdate['uuid']);
-        if ('name' in rawUpdate) result.name = String(rawUpdate['name']);
-        for (const key of Object.keys(rawUpdate)) {
-          if (!result.hasOwnProperty(key)) {
-            const val = rawUpdate[key];
-            if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') result[key] = val;
-          }
-        }
-        return result;
-      }
-
-      function transformUpdateToConversationState(rawUpdate: Record<string, unknown>): Partial<ClaudeConversationPayload> {
-        const conv: Partial<ClaudeConversationPayload> = convertRawUpdateToObject(rawUpdate);
-        if (!rawUpdate['chat_messages']) return conv as ClaudeConversationPayload;
-        conv.chat_messages = (rawUpdate['chat_messages'] as Array<Record<string, unknown>>).map((m) => {
-          const msg: Partial<ClaudeChatMessage> = {};
-          ['uuid', 'parent_message_uuid', 'role', 'sender', 'model'].forEach(k => { if (k in m && typeof (m as any)[k] === 'string') msg[k] = (m as Record<string, unknown>)[k]; });
-          if ('created_at' in m) { const v = (m as Record<string, unknown>)['created_at']; if (v != null) { const n = Number(v); msg.created_at = Number.isFinite(n) ? n : v; } }
-          const contentBlocks: ClaudeContentBlock[] = [];
-          for (const block of (m.content || []) as Array<Record<string, unknown>> | undefined || []) {
-            if (!block.type) continue;
-            if ((block.type as string) === 'tool_use' && typeof (block.name as string) === 'string') { contentBlocks.push({ type: 'tool_use', name: block.name }); }
-            else if (block.type === 'text') contentBlocks.push(block);
-          }
-          msg.content = contentBlocks;
-          return msg as ClaudeChatMessage;
-        });
-        conv.chat_messages = (conv.chat_messages || []).filter(Boolean);
-        return conv as ClaudeConversationPayload;
-      }
-
-      // Hook WebSocket constructor.
-      const OriginalWebSocket = window.WebSocket;
-      (window as unknown as Record<string, unknown>).WebSocket = class extends OriginalWebSocket {
-        constructor(url: string | URL, ...args: unknown[]) {
-          super(url, ...(args as [string, object?]));
-          if (typeof url === 'string') captureExistingWebSocket(url);
-          this.addEventListener('message', (e) => processFrame((e as MessageEvent).data));
-        }
-      };
-
-      // Intercept fetch for `/v2/conversations` responses.
-      const originalFetch = window.fetch;
-      (window as unknown as Record<string, unknown>).fetch = function (url: string | RequestInfo | URL, init?: RequestInit): Promise<Response> {
-        return originalFetch(url, init).then(async response => {
-          try {
-            if (response.url && response.url.includes('/v2/conversations')) {
-              const text = await response.text();
-              let parsed: unknown;
-              try { parsed = JSON.parse(text); } catch { parsed = null; }
-              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) transformUpdateToConversationState(parsed as Record<string, unknown>);
-            }
-          } catch {}
-          return response;
-        }).catch(err => Promise.reject(err));
-      };
-    },
-  });
+interface ClaudeGalleryImage {
+  url?: string;
+  title?: string;
+  id?: string;
+  page_url?: string;
 }
 
-/**
- * Capture all custom SVG widgets from claudeMCP iframe elements across every frame.
- * Pattern sourced from the reference visual-capture logic (visualize:show_widget tool).
- */
-function injectVisualWidgetCapture(tabId: number): Promise<Array<unknown>> {
-  const token = crypto.randomUUID();
-  const CAPTURE_KEY_V3 = '__chatgptExportClaudeVisualCaptureV3';
-  const SHOW_WIDGET_TOOL = 'visualize:show_widget';
-
-  return chrome.scripting.executeScript({
-    target: { tabId, allFrames: true },
-    world: 'MAIN',
-    args: [token, CAPTURE_KEY_V3, SHOW_WIDGET_TOOL],
-    func: (captureToken: string, captureKeyV3: string, visualToolName: string) => {
-      // 1. Detect MCP iframe hostnames.
-      const mcpIframes = [...document.querySelectorAll('iframe')];
-      if (!mcpIframes.length) return [];
-      let mcpFound = false;
-      for (const frame of mcpIframes) {
-        try {
-          const src = String(frame.getAttribute('src') || '');
-          if (/^(?:^|\.)claudemcpcontent\.com$/i.test(new URL(src).hostname)) { mcpFound = true; break; }
-        } catch {}
-      }
-      if (!mcpFound) return [];
-
-      // 2. Set up message listener to collect SVG results back.
-      const capturedSVGs: Array<{ rowIndex: number; svg: string; width: number; height: number }> = [];
-      let done = false;
-
-      function handleMessage(event: MessageEvent): void {
-        if (event.data?.type !== 'chatgpt-export-claude-visual' || String(event.data.token) !== captureToken) return;
-        const svg = typeof event.data.svg === 'string' ? event.data.svg : '';
-        if (!svg) return;
-        capturedSVGs.push({ rowIndex: Number(event.data.rowIndex) || 0, svg, width: Number(event.data.width) || 0, height: Number(event.data.height) || 0 });
-
-        const state = (globalThis as Record<string, unknown>)[captureKeyV3] ||= { handler: handleMessage, scrollPositions: [] };
-        const elementsWithPositions = (state.scrollPositions || []) as Array<{ element: Element; left: number; top: number }>;
-        try { window.scrollTo(0, 60000); } catch {}
-
-        let lastTop = -9_0000;
-        captureAllVisualsOnPageForExport(function (svgResult: Record<string, unknown> | undefined) {
-          if (!svgResult) return;
-          const svgContent = typeof svgResult.svg === 'string' ? svgResult.svg : '';
-          capturedSVGs.push({ rowIndex: Number(svgResult.rowIndex) || 0, svg: svgContent, width: Number(svgResult.width || 0), height: Number(svgResult.height || 0) });
-
-          if ((function () { const el = elementsWithPositions?.at(-1); return (event as any).view === el?.element.ownerDocument.defaultView; })()) lastTop = -9_0000;
-          else {
-            try { event.target.ownerDocument.defaultView?.scrollTo(0, Number(lastTop) + 60000); } catch {}
-            try { event.currentTarget.ownerDocument.defaultView?.scrollTo(0, Number(lastTop) + 60000); } catch {}
-            lastTop = Math.floor(Number(lastTop) + 60000);
-          }
-        });
-
-        if (capturedSVGs.length > 0 || elementsWithPositions.length > 100) { done = true; if ((state as any).handler) window.removeEventListener('message', (state as any).handler); delete globalThis[captureKeyV3]; }
-      }
-
-      window.addEventListener('message', handleMessage);
-      setTimeout(() => { done = true; if ((globalThis as Record<string, unknown>)[captureKeyV3]) window.removeEventListener('message', ((globalThis as Record<string, unknown>)[captureKeyV3] as any).handler); delete globalThis[captureKeyV3]; }, 70_000);
-
-      // 3. For each message that contains the show_widget tool_use or tool_result:
-      const byId = new Map((window.ClaudeConversationData?.chat_messages || []).map((m) => [m.uuid, m]));
-      const messages: Array<{ uuid: string; content: Array<Record<string, unknown>> }> = [];
-      const seen = new Set<string>();
-      let id = window.ClaudeConversationData?.current_leaf_message_uuid || (window as Record<string, unknown>).__claudeLeafMessageUUID;
-      while (id && !seen.has(id)) {
-        seen.add(id);
-        const message = byId.get(id) ?? (window as Record<string, unknown>)[id];
-        if (!message) break;
-        messages.push(message);
-        if (typeof (message.parent_message_uuid) !== 'string' || !message.parent_message_uuid || String(message.parent_message_uuid) === '00000000-0000-4000-8000-000000000000') break;
-        id = message.parent_message_uuid || '';
-      }
-      messages.reverse();
-
-      const targets = messages.map((message, rowIndex) => {
-        const blocks: ClaudeContentBlock[] | undefined = message.content?.filter((b): b is ClaudeContentBlock => typeof b === 'object');
-        if (!blocks) return null;
-        const toolUses = (blocks as ClaudeToolUseBlock[]).filter(b => (typeof b.name === 'string' && b.name === visualToolName && (b.is_mcp_app !== false))).length;
-        const results = blocks.filter((b): b is ClaudeToolResultBlock => (b.type === 'tool_result' && (b as unknown as Record<string, unknown>).name === visualToolName)).length;
-        const count = toolUses || results;
-        return count > 0 ? { rowIndex, count } : null;
-      }).filter(Boolean) as Array<{ rowIndex: number; count: number }>;
-
-      async function captureRound(): Promise<void> {
-        if (!targets.length) return;
-        for (const target of targets.slice(0, 5)) try {
-          await window.scrollTo({ top: document.body.scrollHeight * (target(rowIndex / (targets?.length || 1)), behavior: 'smooth' });
-          await new Promise(r => setTimeout(r, 2_000));
-        } catch {}
-
-        for (const frame of mcpIframes) try {
-          const rect = frame.getBoundingClientRect();
-          if (!(rect.width > 0 && rect.height > 50)) continue;
-          const windowRef = frame.contentWindow || frame.contentDocument?.defaultView;
-          await new Promise<void>(resolve => {
-            setTimeout(resolve, 1_000);
-            try { (windowRef as any)?.scrollTo(0, Math.max(windowRef?.innerHeight || 0, document.body.scrollHeight)); } catch {}
-            if (!mcpFound) return setTimeout(() => resolve(), 1_500);
-          });
-
-          for (const visualTarget of targets) try {
-            const results = await captureVisualForMessage(target(rowIndex), target.contentWindow || frame.contentDocument?.defaultView, message.rowIndex ?? visualTarget.rowIndex);
-            if (!results) return;
-            for (const svg of results) {
-              await new Promise(r => setTimeout(r, 1_000));
-              windowRef?.postMessage({ type: 'chatgpt-export-claude-visual', rowIndex: Number(target(rowIndex)) || visualTarget.rowIndex, svg, width: Math.round((svg as Element)?.getBoundingClientRect().width) || 500, height: Math.round((svg as Element)?.getBoundingClientRect().height) || 500 }, '*');
-            }
-          }
-        } catch {}
-      }
-
-      captureRound();
-
-      // --- nested helpers (for iframe frame world serialization) ---
-
-      function captureAllVisualsOnPageForExport(onCaptured: (result: Record<string, unknown> | string) => void): void { ... };
-      async function captureVisualForMessage(msgEl: Element, ifrmWin: Window | null, messageRowIndex: number): Promise<void> { ... }
-
-      return []; // outer wrapper will use collected SVGs via window messaging.
-    },
-  });
+/** Item shape returned by the recents list endpoint (chat_conversations_v2). */
+interface ClaudeConversationSummary {
+  uuid?: string;
+  name?: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
-// ──────────── branch walking (Claude) ───────────────────
+interface ClaudeConversationListPayload {
+  data?: ClaudeConversationSummary[];
+  has_more?: boolean;
+}
 
-/**
- * Walk chat_messages from current_leaf_message_uuid back to root,
- * building a Map of messageId → chronological index.
- */
-function activeBranchIndexByMessageId(data: ClaudeConversationPayload): Map<string, number> {
-  const byId = new Map((data.chat_messages || []).map(m => [m.uuid, m]));
-  const ids: string[] = [];
+/* ──────────────── constants — forwarded from reference files ───────────── */
+
+const CLAUDE_CONVERSATION_QUERY =
+  '?tree=True&rendering_mode=messages&render_all_tools=true&include_inline_comparison=true&consistency=strong';
+
+const CLAUDE_VISUAL_CAPTURE_KEY = '__chatgptExportClaudeVisualCaptureV3';
+const CLAUDE_SHOW_WIDGET_TOOL = 'visualize:show_widget';
+const CLAUDE_VISUAL_MESSAGE_TYPE = 'chatgpt-export-claude-visual-v3';
+const CLAUDE_MCP_HOST_PATTERN = /(?:^|\.)claudemcpcontent\.com$/i;
+const CLAUDE_MCP_APP_PATH = '/mcp_apps';
+/** Sentinel parent id Claude uses for the first message in a conversation. */
+const CLAUDE_ROOT_PARENT = '00000000-0000-4000-8000-000000000000';
+
+/* ──────────────── generic helpers ──────────────────────────────────────── */
+
+/** Narrow an unknown JSON value to a plain object record. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/** Resolve after the given number of milliseconds. */
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>(resolve => setTimeout(() => resolve(), ms));
+}
+
+/* ──────────────── branch walking (from claude-normalize.js) ────────────── */
+
+/** Walk chat_messages from current_leaf_message_uuid back to the root. */
+function activeBranchMessages(data: ClaudeConversationPayload): ClaudeChatMessage[] {
+  const byId = new Map((data.chat_messages || []).map(message => [message.uuid, message]));
+  const messages: ClaudeChatMessage[] = [];
   const seen = new Set<string>();
   let id = data.current_leaf_message_uuid || '';
 
@@ -334,59 +178,110 @@ function activeBranchIndexByMessageId(data: ClaudeConversationPayload): Map<stri
     seen.add(id);
     const message = byId.get(id);
     if (!message) break;
-    ids.push(id);
+    messages.push(message);
+
     const parent = message.parent_message_uuid;
-    if (!parent || parent === '00000000-0000-4000-8000-000000000000') break;
+    if (!parent || parent === CLAUDE_ROOT_PARENT) break;
     id = parent;
   }
 
-  ids.reverse();
+  return messages.reverse();
+}
+
+/** Map each active-branch message id to its chronological index. */
+function activeBranchIndexByMessageId(data: ClaudeConversationPayload): Map<string, number> {
+  const ids = activeBranchMessages(data).map(message => message.uuid);
   return new Map(ids.map((messageId, index) => [messageId, index]));
 }
 
-// ──────────── normalisation (Claude) ─────────────
+/* ──────────────── attachment helpers (from claude-normalize.js) ────────── */
 
-/** Build ContentBlock[] and Claude-compatible attachments for one message. */
-function extractClaudeContent(message: ClaudeChatMessage): {
-  textParts: string[];
-  attachments: Array<Record<string, unknown>>;
-} {
+/** Build a remote image attachment record from an image_gallery entry. */
+function remoteImageAttachment(image: ClaudeGalleryImage): ClaudeRemoteImageAttachment | null {
+  const remoteUrl = typeof image?.url === 'string' ? image.url.trim() : '';
+  if (!remoteUrl) return null;
+
+  let pathName = '';
+  try {
+    pathName = new URL(remoteUrl).pathname.split('/').filter(Boolean).at(-1) || '';
+  } catch { pathName = ''; }
+
+  const title = String(image?.title || 'Image')
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || 'Image';
+
+  let decodedPathName = pathName;
+  try {
+    decodedPathName = decodeURIComponent(pathName);
+  } catch { /* keep the raw path when it is not valid percent-encoding */ }
+
+  const originalName = decodedPathName && /\.[A-Za-z0-9]{1,10}$/.test(decodedPathName)
+    ? decodedPathName
+    : title;
+
+  const ext = (pathName.match(/\.([A-Za-z0-9]{2,5})(?:$|[?#])/i)?.[1] || '').toLowerCase();
+  const mimeType: ClaudeRemoteImageAttachment['mimeType'] = ext === 'png'
+    ? 'image/png'
+    : ext === 'jpg' || ext === 'jpeg'
+      ? 'image/jpeg'
+      : ext === 'webp'
+        ? 'image/webp'
+        : ext === 'gif'
+          ? 'image/gif'
+          : 'application/octet-stream';
+
+  return {
+    source: 'claude-remote-image',
+    id: image?.id || remoteUrl,
+    remoteUrl,
+    sourceUrl: typeof image?.page_url === 'string' ? image.page_url.trim() || null : null,
+    originalName,
+    title,
+    mimeType,
+    isImage: true,
+  };
+}
+
+/** Collect text parts and attachments for one Claude message. */
+function extractClaudeContent(
+  message: ClaudeChatMessage,
+  data: ClaudeConversationPayload,
+): { textParts: string[]; attachments: Message['attachments'] } {
   const textParts: string[] = [];
-  const attachments: Array<Record<string, unknown>> = [];
+  const attachments: Message['attachments'] = [];
 
   for (const block of message.content || []) {
-    // Text blocks.
-    if ((block as ClaudeTextBlock).type === 'text') {
-      const txt = (block as ClaudeTextBlock).text;
-      if (typeof txt === 'string' && txt.trim()) textParts.push(txt);
+    if (block.type === 'text') {
+      if (typeof block.text === 'string' && block.text.trim()) textParts.push(block.text);
       continue;
     }
 
-    // Tool result blocks → attachments.
-    if (!(block as ClaudeToolResultBlock).type) continue;
-    const toolResult = block as ClaudeToolResultBlock;
-    if (!Array.isArray(toolResult.content)) continue;
+    if (block.type !== 'tool_result' || !Array.isArray(block.content)) continue;
 
-    for (const item of toolResult.content) {
-      if ((item as ClaudeLocalResource).type === 'local_resource' && typeof (item as ClaudeLocalResource).file_path === 'string') {
-        const localRes = item as ClaudeLocalResource;
-        const pathName = localRes.file_path.split('/').filter(Boolean).at(-1) || null;
-        const itemName = typeof localRes.name === 'string' ? localRes.name.trim() : '';
+    for (const item of block.content) {
+      if (item.type === 'local_resource' && item.file_path) {
+        const pathName = item.file_path.split('/').filter(Boolean).at(-1) || null;
+        const itemName = typeof item.name === 'string' ? item.name.trim() : '';
         const originalName = itemName && /\.[A-Za-z0-9]{1,10}$/.test(itemName)
-          ? itemName : pathName || itemName || null;
-        attachments.push({ source: 'claude-local-resource', id: item.uuid || item.file_path || '', filePath: localRes.file_path, originalName, mimeType: item.mime_type || 'application/octet-stream' });
+          ? itemName
+          : pathName || itemName || null;
+
+        attachments.push({
+          source: 'claude-local-resource',
+          id: item.uuid || item.file_path,
+          filePath: item.file_path,
+          originalName,
+          mimeType: item.mime_type || 'application/octet-stream',
+          conversationId: typeof data?.uuid === 'string' ? data.uuid : null,
+        });
         continue;
       }
 
-      if ((item as ClaudeImageGallery).type === 'image_gallery' && (item as ClaudeImageGallery).images?.length) {
-        const gallery = item as ClaudeImageGallery;
-        for (const img of gallery.images) {
-          const url = typeof img.url === 'string' ? img.url.trim() : '';
-          if (!url) continue;
-          let pathName = '';
-          try { pathName = new URL(url).pathname.split('/').filter(Boolean).at(-1) || ''; } catch {}
-          const title = String(img.title || '').replace(/[\\/:*?"<>|]/g, ' ').trim() || 'Image';
-          attachments.push({ source: 'claude-remote-image', id: img.id || url, remoteUrl: url, sourceUrl: img.page_url || null, originalName: title, title, mimeType: 'image/png' as const, isImage: true });
+      if (item.type === 'image_gallery' && Array.isArray(item.images)) {
+        for (const image of item.images) {
+          const attachment = remoteImageAttachment(image);
+          if (attachment) attachments.push(attachment);
         }
       }
     }
@@ -395,11 +290,568 @@ function extractClaudeContent(message: ClaudeChatMessage): {
   return { textParts, attachments };
 }
 
-// ──────────── ClaudeExtractor class ─────────────
+/** Attach the custom SVG visuals that belong to one assistant message. */
+function customVisualAttachments(
+  data: ClaudeConversationPayload,
+  messageId: string,
+  activeIndexById: Map<string, number>,
+): ClaudeCustomVisualAttachment[] {
+  const rowIndex = activeIndexById.get(messageId);
+  if (typeof rowIndex !== 'number' || !Number.isInteger(rowIndex)) return [];
+
+  return (data.__customVisuals || [])
+    .filter(item => item?.rowIndex === rowIndex && typeof item.svg === 'string' && item.svg)
+    .map((item, index) => {
+      const attachment: ClaudeCustomVisualAttachment = {
+        source: 'claude-custom-visual',
+        id: `claude-visual:${messageId}:${index}`,
+        originalName: `claude-visual-${rowIndex + 1}-${index + 1}.svg`,
+        mimeType: 'image/svg+xml',
+        width: item.width ?? null,
+        height: item.height ?? null,
+        isImage: true,
+      };
+      Object.defineProperty(attachment, '__inlineSvg', {
+        value: item.svg,
+        enumerable: false,
+      });
+      return attachment;
+    });
+}
+
+/* ──────────────── visual targets (from claude-visual-capture.js) ───────── */
+
+/** Find the active-branch rows that are expected to render custom visuals. */
+function claudeCustomVisualTargets(data: ClaudeConversationPayload): ClaudeVisualTarget[] {
+  const targets: ClaudeVisualTarget[] = [];
+
+  activeBranchMessages(data).forEach((message, rowIndex) => {
+    const blocks: ClaudeContentBlock[] = Array.isArray(message?.content) ? message.content : [];
+
+    const toolUses = blocks.filter(block =>
+      block.type === 'tool_use' &&
+      block.name === CLAUDE_SHOW_WIDGET_TOOL &&
+      block.is_mcp_app !== false
+    ).length;
+    const toolResults = blocks.filter(block =>
+      block.type === 'tool_result' && block.name === CLAUDE_SHOW_WIDGET_TOOL
+    ).length;
+
+    const count = toolUses || toolResults;
+    if (count > 0) targets.push({ rowIndex, count });
+  });
+
+  return targets;
+}
+
+/** Merge previously captured visuals with a freshly captured batch. */
+function mergeVisuals(
+  existing: ClaudeCapturedVisual[],
+  captured: ClaudeCapturedVisual[],
+): ClaudeCapturedVisual[] {
+  if (!captured.length) return existing;
+
+  const byKey = new Map<string, ClaudeCapturedVisual>();
+  const remember = (visual: ClaudeCapturedVisual): void => {
+    if (typeof visual?.svg !== 'string' || !visual.svg) return;
+    const visualIndex = typeof visual.visualIndex === 'number' ? visual.visualIndex : 0;
+    byKey.set(`${visual.rowIndex}:${visualIndex}`, { ...visual, visualIndex });
+  };
+
+  for (const visual of existing || []) remember(visual);
+  for (const visual of captured) remember(visual);
+
+  return [...byKey.values()]
+    .sort((a, b) => a.rowIndex - b.rowIndex || (a.visualIndex ?? 0) - (b.visualIndex ?? 0));
+}
+
+/* ──────────────── conversation fetch (from claude-api.js) ──────────────── */
+
+/**
+ * Fetch the raw conversation payload from inside the page, discovering the
+ * organization id first so the org-scoped conversation endpoint can be used.
+ */
+async function fetchClaudeConversationInPage(tabId: number): Promise<ClaudeConversationPayload> {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: async (): Promise<ClaudeConversationPayload> => {
+      const match = location.pathname.match(/\/chat\/([0-9a-f-]{36})/i);
+      if (!match) throw new Error('No active Claude conversation found');
+      const conversationId = match[1];
+
+      const candidates: string[] = [];
+      const marker = `/chat_conversations/${conversationId}`;
+
+      // Prefer the organization id already visible in a performance entry.
+      const resources = performance.getEntriesByType('resource').map(entry => entry.name);
+      for (let i = resources.length - 1; i >= 0; i--) {
+        try {
+          const url = new URL(resources[i], location.href);
+          if (!url.pathname.includes(marker)) continue;
+          const parts = url.pathname.split('/');
+          const orgIndex = parts.indexOf('organizations');
+          if (orgIndex >= 0 && parts[orgIndex + 1]) {
+            candidates.push(decodeURIComponent(parts[orgIndex + 1]));
+            break;
+          }
+        } catch { /* ignore malformed resource entries */ }
+      }
+
+      // Fall back to the organizations endpoint.
+      try {
+        const orgResponse = await fetch('/api/organizations', { credentials: 'include' });
+        if (orgResponse.ok) {
+          const orgData: unknown = await orgResponse.json();
+          const organizations: Array<Record<string, unknown>> = Array.isArray(orgData)
+            ? orgData as Array<Record<string, unknown>>
+            : (isRecord(orgData) && Array.isArray(orgData.organizations)
+                ? orgData.organizations as Array<Record<string, unknown>>
+                : []);
+          for (const item of organizations) {
+            const id = item?.uuid || item?.id || item?.organization_id;
+            if (id) candidates.push(String(id));
+          }
+        }
+      } catch { /* organization discovery is best-effort */ }
+
+      const query =
+        '?tree=True&rendering_mode=messages&render_all_tools=true' +
+        '&include_inline_comparison=true&consistency=strong';
+
+      for (const organizationId of [...new Set(candidates)]) {
+        const response = await fetch(
+          `/api/organizations/${encodeURIComponent(organizationId)}` +
+          `/chat_conversations/${encodeURIComponent(conversationId)}${query}`,
+          { credentials: 'include' },
+        );
+        if (!response.ok) continue;
+        const data = await response.json() as Record<string, unknown>;
+        return { ...data, __organizationId: organizationId };
+      }
+
+      throw new Error('No active Claude conversation found');
+    },
+  });
+
+  const data = results[0]?.result;
+  if (!data || !Array.isArray(data.chat_messages) || !data.current_leaf_message_uuid) {
+    throw new Error('No active Claude conversation found');
+  }
+  return data;
+}
+
+/* ──────────────── custom visual capture (from claude-visual-capture.js) ── */
+
+/**
+ * Capture every custom SVG widget rendered inside a claude.ai MCP iframe.
+ * Each injected function is self-contained: it may only use its arguments and
+ * page globals, never the module scope.
+ */
+async function captureClaudeCustomVisuals(
+  tabId: number,
+  targets: ClaudeVisualTarget[],
+): Promise<ClaudeCapturedVisual[]> {
+  if (!targets.length) return [];
+  const token = crypto.randomUUID();
+
+  /** Ask every MCP frame to serialise its largest SVG and post it upward. */
+  const captureRound = async (): Promise<void> => {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      world: 'MAIN',
+      args: [token],
+      func: (captureToken: string) => {
+        if (
+          !/(?:^|\.)claudemcpcontent\.com$/i.test(location.hostname) ||
+          location.pathname !== '/mcp_apps'
+        ) return null;
+
+        const candidates = [...document.querySelectorAll('svg')]
+          .map(svg => ({ svg, rect: svg.getBoundingClientRect() }))
+          .filter(item => item.rect.width > 100 && item.rect.height > 50)
+          .sort((a, b) => (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
+        const source = candidates[0];
+        if (!source) return null;
+
+        const clone = source.svg.cloneNode(true) as SVGSVGElement;
+        clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+        const properties = [
+          'color',
+          'fill',
+          'fill-opacity',
+          'stroke',
+          'stroke-opacity',
+          'stroke-width',
+          'stroke-linecap',
+          'stroke-linejoin',
+          'stroke-dasharray',
+          'opacity',
+          'font-family',
+          'font-size',
+          'font-weight',
+          'font-style',
+          'letter-spacing',
+          'text-anchor',
+          'dominant-baseline',
+          'visibility',
+          'display',
+          'paint-order',
+          'vector-effect',
+          'marker-start',
+          'marker-mid',
+          'marker-end',
+        ];
+
+        // Inline every computed presentation property so the SVG stands alone.
+        const originals = [source.svg, ...source.svg.querySelectorAll<SVGElement>('*')];
+        const clones = [clone, ...clone.querySelectorAll<SVGElement>('*')];
+        originals.forEach((element, index) => {
+          const target = clones[index];
+          if (!target) return;
+          const style = getComputedStyle(element);
+          for (const property of properties) {
+            const value = style.getPropertyValue(property);
+            if (value) target.style.setProperty(property, value);
+          }
+        });
+
+        for (const script of clone.querySelectorAll('script')) script.remove();
+        for (const foreignObject of clone.querySelectorAll('foreignObject')) foreignObject.remove();
+
+        // Strip event handlers and javascript: URLs.
+        for (const element of [clone, ...clone.querySelectorAll('*')]) {
+          for (const attr of [...element.attributes]) {
+            if (/^on/i.test(attr.name)) {
+              element.removeAttribute(attr.name);
+              continue;
+            }
+            if (
+              /^(?:href|xlink:href)$/i.test(attr.name) &&
+              /^\s*javascript:/i.test(attr.value)
+            ) {
+              element.removeAttribute(attr.name);
+            }
+          }
+        }
+
+        const viewBox = clone.viewBox?.baseVal;
+        if (viewBox?.width > 0 && viewBox?.height > 0) {
+          clone.setAttribute('width', String(viewBox.width));
+          clone.setAttribute('height', String(viewBox.height));
+        } else {
+          clone.setAttribute('width', String(Math.round(source.rect.width)));
+          clone.setAttribute('height', String(Math.round(source.rect.height)));
+        }
+
+        window.parent.postMessage({
+          type: 'chatgpt-export-claude-visual-v3',
+          token: captureToken,
+          svg: new XMLSerializer().serializeToString(clone),
+          width: source.rect.width,
+          height: source.rect.height,
+        }, '*');
+        return true;
+      },
+    });
+  };
+
+  /** Rows that still expect more visuals than have been captured. */
+  const missingRows = async (): Promise<number[]> => {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      args: [CLAUDE_VISUAL_CAPTURE_KEY, token],
+      func: (registryKey: string, captureToken: string): number[] => {
+        const state = (globalThis as Record<string, unknown>)[registryKey] as
+          ClaudeVisualPageState | undefined;
+        if (!state || state.token !== captureToken) return [];
+
+        return [...new Set(
+          state.targets
+            .filter(target => {
+              let count = 0;
+              for (const visual of state.visuals.values()) {
+                if (visual.rowIndex === target.rowIndex) count++;
+              }
+              return count < target.count;
+            })
+            .map(target => target.rowIndex),
+        )];
+      },
+    });
+    return results[0]?.result ?? [];
+  };
+
+  /** Scroll a not-yet-mounted transcript row into view. */
+  const bringRowIntoView = async (rowIndex: number, settleMs: number): Promise<boolean> => {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      args: [CLAUDE_VISUAL_CAPTURE_KEY, token, rowIndex, settleMs],
+      func: async (
+        registryKey: string,
+        captureToken: string,
+        targetRowIndex: number,
+        delayMs: number,
+      ): Promise<boolean> => {
+        const state = (globalThis as Record<string, unknown>)[registryKey] as
+          ClaudeVisualPageState | undefined;
+        if (!state || state.token !== captureToken) return false;
+
+        const selector = `[data-testid="transcript-row"][data-index="${targetRowIndex}"]`;
+        const mountedRows = (): Array<{ row: Element; index: number }> =>
+          [...document.querySelectorAll('[data-testid="transcript-row"][data-index]')]
+            .map(row => ({ row, index: Number(row.getAttribute('data-index')) }))
+            .filter(item => Number.isInteger(item.index))
+            .sort((a, b) => a.index - b.index);
+
+        const scrollingAncestor = (element: Element | null): Element | null => {
+          for (let parent = element?.parentElement; parent; parent = parent.parentElement) {
+            const style = getComputedStyle(parent);
+            if (
+              /(?:auto|scroll)/.test(style.overflowY) &&
+              parent.scrollHeight > parent.clientHeight + 1
+            ) return parent;
+          }
+          return document.scrollingElement;
+        };
+
+        const waitFrame = (): Promise<void> =>
+          new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+
+        for (let attempt = 0; attempt < 100; attempt++) {
+          const row = document.querySelector(selector);
+          if (row) {
+            row.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+            await waitFrame();
+            await new Promise<void>(resolve => setTimeout(() => resolve(), delayMs));
+            return true;
+          }
+
+          const rows = mountedRows();
+          if (!rows.length) return false;
+
+          const first = rows[0];
+          const last = rows[rows.length - 1];
+          let direction: number;
+          let anchor: { row: Element; index: number };
+          if (targetRowIndex < first.index) {
+            direction = -1;
+            anchor = first;
+          } else if (targetRowIndex > last.index) {
+            direction = 1;
+            anchor = last;
+          } else {
+            anchor = rows.reduce((best, item) =>
+              Math.abs(item.index - targetRowIndex) < Math.abs(best.index - targetRowIndex) ? item : best
+            , rows[0]);
+            direction = targetRowIndex < anchor.index ? -1 : 1;
+          }
+
+          const scroller = scrollingAncestor(anchor.row);
+          if (!scroller) return false;
+
+          const viewport = scroller === document.scrollingElement ? window.innerHeight : scroller.clientHeight;
+          const step = Math.max(450, Math.round(viewport * 1.6));
+          const before = scroller.scrollTop;
+          scroller.scrollTop = before + direction * step;
+
+          if (scroller.scrollTop === before) {
+            anchor.row.scrollIntoView({
+              block: direction < 0 ? 'start' : 'end',
+              inline: 'nearest',
+              behavior: 'auto',
+            });
+          }
+
+          await waitFrame();
+          await new Promise<void>(resolve => setTimeout(() => resolve(), 90));
+        }
+
+        return false;
+      },
+    });
+    return results[0]?.result === true;
+  };
+
+  /** Restore scroll positions, detach the listener and return the visuals. */
+  const finishCapture = async (): Promise<ClaudeCapturedVisual[]> => {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      args: [CLAUDE_VISUAL_CAPTURE_KEY, token],
+      func: (registryKey: string, captureToken: string): ClaudeCapturedVisual[] => {
+        const state = (globalThis as Record<string, unknown>)[registryKey] as
+          ClaudeVisualPageState | undefined;
+        if (!state || state.token !== captureToken) return [];
+
+        for (const item of [...state.scrollPositions].reverse()) {
+          try {
+            item.element.scrollLeft = item.left;
+            item.element.scrollTop = item.top;
+          } catch { /* the element may have been unmounted */ }
+        }
+        try {
+          window.scrollTo(state.windowPosition.left, state.windowPosition.top);
+        } catch { /* scrolling may be blocked */ }
+
+        const visuals = [...state.visuals.values()]
+          .sort((a, b) => a.rowIndex - b.rowIndex || (a.visualIndex ?? 0) - (b.visualIndex ?? 0));
+
+        if (state.handler) window.removeEventListener('message', state.handler);
+        delete (globalThis as Record<string, unknown>)[registryKey];
+        return visuals;
+      },
+    });
+    return results[0]?.result ?? [];
+  };
+
+  try {
+    const setupResults = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      args: [CLAUDE_VISUAL_CAPTURE_KEY, token, targets],
+      func: (
+        registryKey: string,
+        captureToken: string,
+        visualTargets: ClaudeVisualTarget[],
+      ): { expectedCount: number } => {
+        const old = (globalThis as Record<string, unknown>)[registryKey] as
+          ClaudeVisualPageState | undefined;
+        if (old?.handler) window.removeEventListener('message', old.handler);
+
+        const isMcpFrame = (frame: HTMLIFrameElement): boolean => {
+          try {
+            const url = new URL(frame.src, location.href);
+            return (
+              /(?:^|\.)claudemcpcontent\.com$/i.test(url.hostname) &&
+              url.pathname === '/mcp_apps'
+            );
+          } catch { return false; }
+        };
+
+        // Remember every scrollable ancestor so it can be restored afterwards.
+        const scrollPositions: Array<{ element: Element; left: number; top: number }> = [];
+        const seen = new Set<Element>();
+        const mounted = [...document.querySelectorAll('[data-testid="transcript-row"][data-index]')];
+        for (const row of mounted) {
+          for (let parent = row.parentElement; parent; parent = parent.parentElement) {
+            const style = getComputedStyle(parent);
+            if (
+              /(?:auto|scroll)/.test(style.overflowY) &&
+              parent.scrollHeight > parent.clientHeight + 1 &&
+              !seen.has(parent)
+            ) {
+              seen.add(parent);
+              scrollPositions.push({
+                element: parent,
+                left: parent.scrollLeft,
+                top: parent.scrollTop,
+              });
+            }
+          }
+        }
+
+        const scrollingElement = document.scrollingElement;
+        if (scrollingElement && !seen.has(scrollingElement)) {
+          scrollPositions.push({
+            element: scrollingElement,
+            left: scrollingElement.scrollLeft,
+            top: scrollingElement.scrollTop,
+          });
+        }
+
+        const state: ClaudeVisualPageState = {
+          token: captureToken,
+          targets: visualTargets,
+          visuals: new Map<string, ClaudeCapturedVisual>(),
+          scrollPositions,
+          windowPosition: { left: window.scrollX, top: window.scrollY },
+          handler: null,
+        };
+
+        const handler = (event: MessageEvent): void => {
+          const data = event?.data as Record<string, unknown> | null | undefined;
+          if (
+            !data ||
+            data.type !== 'chatgpt-export-claude-visual-v3' ||
+            data.token !== captureToken ||
+            !data.svg
+          ) return;
+
+          const frames = [...document.querySelectorAll('iframe')].filter(isMcpFrame);
+          const frame = frames.find(candidate => candidate.contentWindow === event.source);
+          const row = frame?.closest?.('[data-testid="transcript-row"][data-index]');
+          const rowIndex = Number(row?.getAttribute('data-index'));
+          if (!Number.isInteger(rowIndex)) return;
+          if (!state.targets.some(target => target.rowIndex === rowIndex)) return;
+
+          const siblings = [...(row?.querySelectorAll('iframe') || [])].filter(isMcpFrame);
+          const visualIndex = Math.max(0, siblings.indexOf(frame as HTMLIFrameElement));
+          state.visuals.set(`${rowIndex}:${visualIndex}`, {
+            rowIndex,
+            visualIndex,
+            svg: String(data.svg),
+            width: Number(data.width) || null,
+            height: Number(data.height) || null,
+          });
+        };
+
+        state.handler = handler;
+        (globalThis as Record<string, unknown>)[registryKey] = state;
+        window.addEventListener('message', handler);
+
+        return { expectedCount: visualTargets.reduce((sum, target) => sum + target.count, 0) };
+      },
+    });
+
+    const setup = setupResults[0]?.result;
+    if (!setup?.expectedCount) return await finishCapture();
+
+    // Capture whatever Claude currently has rendered before moving the transcript.
+    await captureRound();
+    await sleep(120);
+
+    for (const rowIndex of await missingRows()) {
+      for (const settleMs of [800, 1400]) {
+        if (!(await bringRowIntoView(rowIndex, settleMs))) break;
+        await captureRound();
+        await sleep(150);
+        if (!(await missingRows()).includes(rowIndex)) break;
+      }
+    }
+
+    return await finishCapture();
+  } catch (error) {
+    console.warn('kontekst: Claude visual capture failed', error);
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        args: [CLAUDE_VISUAL_CAPTURE_KEY],
+        func: (registryKey: string) => {
+          const state = (globalThis as Record<string, unknown>)[registryKey] as
+            ClaudeVisualPageState | undefined;
+          for (const item of [...(state?.scrollPositions || [])].reverse()) {
+            try {
+              item.element.scrollLeft = item.left;
+              item.element.scrollTop = item.top;
+            } catch { /* the element may have been unmounted */ }
+          }
+          if (state?.handler) window.removeEventListener('message', state.handler);
+          delete (globalThis as Record<string, unknown>)[registryKey];
+        },
+      });
+    } catch { /* cleanup is best-effort */ }
+    return [];
+  }
+}
+
+/* ──────────────── ClaudeExtractor class ───────────────────────────────── */
 
 export class ClaudeExtractor extends BaseExtractor {
-  private httpClient = new HttpClient();
-
   constructor() {
     super(Platform.Claude);
   }
@@ -407,195 +859,138 @@ export class ClaudeExtractor extends BaseExtractor {
   /** Check that the current tab is a Claude chat page. */
   async isValidPage(tabId: number): Promise<boolean> {
     try {
-      const tabUrl = (await chrome.tabs.get(tabId)).url;
-      if (!tabUrl) return false;
-      // Claude conversation tabs host claude.ai or cdn.clau de/anycast.
-      return /^https:\/\/(www\.)?claude\.ai\/(chat|backend-api)/i.test(tabUrl);
-    } catch {
-      return false;
-    }
+      const tab = await chrome.tabs.get(tabId);
+      if (!tab?.url) return false;
+      return /^https:\/\/(www\.)?claude\.ai\//i.test(tab.url);
+    } catch { return false; }
   }
 
-  /** Extract the full conversation for a tab — captures WebSocket frames + SVG widgets. */
-  async extractConversation(
-    tabs: number | number[],
-    selectedMessages?: Set<string>,
-  ): Promise<Record<string, unknown>> {
-    const tabIds = Array.isArray(tabs) ? tabs : [tabs];
+  // ── extractConversation: page fetch + visual capture + branch walk ──
 
-    // Determine the first valid Claude tab to use as reference.
-    let activeTabId: number;
-    for (const tid of tabIds) {
-      if (await this.isValidPage(tid)) { activeTabId = tid; break; }
-    }
-    if (!activeTabId) throw new Error('Not a valid Claude conversation page');
+  async extractConversation(tabId: number): Promise<Record<string, unknown>> {
+    const valid = await this.isValidPage(tabId);
+    if (!valid) throw new Error('Not a valid Claude conversation page');
 
-    // 1. Inject WebSocket capture → captures live frame payloads.
-    await injectWebSocketCapture(activeTabId);
+    // 1. Fetch the conversation payload from inside the page (org-aware).
+    const data = await fetchClaudeConversationInPage(tabId);
 
-    // Wait for messages from injected script (captures ongoing WS frames).
-    const captured = await waitForCapturedState(WS_CAPTURE_KEY, CAPTURE_TIMEOUT_MS);
+    // 2. Capture the custom SVG widgets rendered inside MCP iframes.
+    const captured = await captureClaudeCustomVisuals(tabId, claudeCustomVisualTargets(data));
+    const visuals = mergeVisuals(data.__customVisuals || [], captured);
+    const payload: ClaudeConversationPayload = visuals.length
+      ? { ...data, __customVisuals: visuals }
+      : data;
 
-    // 2. Fetch the full conversation via API (the primary data source).
-    const apiPayload = await this.fetchConversationAPI(activeTabId) as ClaudeConversationPayload;
-
-    // If the API payload is empty, fall back to captured in-page state.
-    if (!apiPayload?.chat_messages?.length && Object.keys(captured).length > 0) {
-      return captured as Record<string, unknown>;
-    }
-
-    // 3. Capture custom SVG widgets (visualize:show_widget via MCP iframe).
-    await injectVisualWidgetCapture(activeTabId);
-    const visualSVGs = await waitForCapturedVisuals();
-
-    // 4. Walk the active branch and normalise to shared schema.
-    return this.normalizeClaudeConversation(apiPayload, tabIds[selectedMessages ? Array.from(tabIds).indexOf(selectedMessages[0]) ?? 0] ?? activeTabId);
+    // 3. Walk the active branch and normalise to the shared schema.
+    return this.normalizeConversation(payload, activeBranchMessages(payload));
   }
 
-  /** List conversations from Claude's backend API. */
-  async listConversations(_page: number = 0, _pageSize: number = 20): Promise<Record<string, unknown>[]> {
-    const sessionCookie = await this.getClaudeSessionToken();
-    const apiUrl = `/backend-api/v2/conversations?offset=0&limit=${_pageSize}`;
+  // ── getConversation: API-only (headless) ─────────────────────────────
 
-    const response = await fetch(apiUrl, {
-      method: 'GET',
-      headers: {
-        cookie: sessionCookie!,
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${(await this.getClaudeAccessToken()) || ''}`,
-      },
-    });
+  async getConversation(conversationId: string): Promise<Record<string, unknown>> {
+    const organizationId = await this.findOrganizationId();
+    const res = await fetch(
+      `/api/organizations/${encodeURIComponent(organizationId)}` +
+      `/chat_conversations/${encodeURIComponent(conversationId)}${CLAUDE_CONVERSATION_QUERY}`,
+      { credentials: 'include' },
+    );
+    if (!res.ok) throw new Error(`Claude conversation fetch: ${res.status}`);
 
-    if (!response.ok) throw new Error(`Failed to list conversations (${response.status})`);
-    const data = await response.json();
-    return (data.objects || []).map((c: Record<string, unknown>) => ({
-      id: (c.id as string) || null,
-      title: (c.name as string) || null,
-      createdAt: c.created_at ? new Date(Number(c.created_at) * 1000).toISOString() : null,
+    const data = (await res.json()) as ClaudeConversationPayload;
+    return this.normalizeConversation(data, activeBranchMessages(data));
+  }
+
+  // ── listConversations: pagination over chat_conversations_v2 ─────────
+
+  async listConversations(page: number = 0, pageSize: number = 20): Promise<Record<string, unknown>[]> {
+    const organizationId = await this.findOrganizationId();
+    const res = await fetch(
+      `/api/organizations/${encodeURIComponent(organizationId)}` +
+      `/chat_conversations_v2?limit=${pageSize}&offset=${page * pageSize}&consistency=eventual`,
+      { credentials: 'include' },
+    );
+    if (!res.ok) throw new Error(`Claude conversation list: ${res.status}`);
+
+    const payload = (await res.json()) as ClaudeConversationListPayload;
+    const items = Array.isArray(payload?.data) ? payload.data : [];
+    return items.map(item => ({
+      id: item.uuid || null,
+      title: typeof item.name === 'string' ? item.name : '',
+      createdAt: typeof item.created_at === 'string' ? item.created_at : null,
     }));
   }
 
-  /** Get a single conversation by UUID. */
-  async getConversation(conversationId: string): Promise<Record<string, unknown>> {
-    const response = await fetch(`/backend-api/v2/conversations/${conversationId}`, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
-    });
+  // ── private helpers ──────────────────────────────────────────────────
 
-    if (!response.ok) throw new Error(`Failed to get conversation (${response.status})`);
-    const data = await response.json();
-    return this.normalizeClaudeConversation(data as ClaudeConversationPayload);
+  /** Resolve the organization id that scopes every Claude conversation call. */
+  private async findOrganizationId(): Promise<string> {
+    const res = await fetch('/api/organizations', { credentials: 'include' });
+    if (!res.ok) throw new Error(`Claude organizations fetch: ${res.status}`);
+
+    const payload: unknown = await res.json();
+    const organizations: Array<Record<string, unknown>> = Array.isArray(payload)
+      ? payload as Array<Record<string, unknown>>
+      : (isRecord(payload) && Array.isArray(payload.organizations)
+          ? payload.organizations as Array<Record<string, unknown>>
+          : []);
+
+    for (const organization of organizations) {
+      const id = organization.uuid || organization.id || organization.organization_id;
+      if (id) return String(id);
+    }
+
+    throw new Error('Claude organization id was not found');
   }
 
-  // ── private helpers ───────────────────────────────────
+  // ── Normalisation ────────────────────────────────────────────────────
 
-  /** Fetch the Claude backend API conversation payload using an active session. */
-  private async fetchConversationAPI(tabId: number): Promise<unknown> {
-    const apiUrl = '/backend-api/v2/conversations?offset=0&limit=1';
-    // Use httpClient for token caching — same pattern as reference (5-min TTL).
-    return this.httpClient.fetchJSON(apiUrl);
-  }
-
-  private async normalizeClaudeConversation(data: ClaudeConversationPayload, tabId?: number): Promise<Record<string, unknown>> {
+  private normalizeConversation(
+    data: ClaudeConversationPayload,
+    branch: ClaudeChatMessage[],
+    omission: ClaudeOmission = {},
+  ): Record<string, unknown> {
     const messages: Message[] = [];
     const activeIndexById = activeBranchIndexByMessageId(data);
 
-    for (let i = 0; i < data.chat_messages.length; i++) {
-      const message = data.chat_messages[i];
-      const { textParts, attachments } = extractClaudeContent(message);
-      if (!textParts?.length && !attachments?.length) continue;
+    for (const message of branch) {
+      const { textParts, attachments } = extractClaudeContent(message, data);
+      attachments.push(...customVisualAttachments(data, message.uuid, activeIndexById));
+      if (!textParts.length && !attachments.length) continue;
 
-      const role = message.sender === 'human' ? 'user' : 'assistant';
-      const branchIndex = activeIndexById.get(message.uuid) ?? i;
+      const role: 'user' | 'assistant' = message.sender === 'human' ? 'user' : 'assistant';
+      const createdAt = typeof message.created_at === 'string'
+        ? message.created_at
+        : (typeof message.created_at === 'number'
+            ? new Date(message.created_at * 1000).toISOString()
+            : null);
+
       messages.push({
         id: message.uuid,
         parentId: message.parent_message_uuid || null,
         role,
         sourceRole: message.sender || role,
-        createdAt: typeof message.created_at === 'string' ? message.created_at : new Date((Number(message.created_at) || 0) * 1000).toISOString(),
+        createdAt,
         model: role === 'assistant' ? (message.model || data.model || null) : null,
-        content: textParts.map(text => ({ type: ContentBlockType.Text, text, format: 'markdown' as const })),
+        ...(omission.beforeIds?.has(message.uuid) ? { omittedBefore: true } : {}),
+        content: textParts.map(text => ({
+          type: ContentBlockType.Text,
+          text,
+          format: 'markdown' as const,
+        })),
         attachments,
-        ...(branchIndex === 0 ? { omittedBefore: true } : {}),
       });
     }
+
+    if (omission.omittedAtStart && messages.length) messages[0].omittedBefore = true;
+    if (omission.omittedAtEnd && messages.length) messages[messages.length - 1].omittedAfter = true;
 
     return {
       platform: Platform.Claude,
       conversationId: data.uuid || null,
-      conversationUrl: `https://claude.ai/chat/${data.uuid}`,
+      conversationUrl: data.uuid ? `https://claude.ai/chat/${data.uuid}` : null,
       title: typeof data.name === 'string' ? data.name : '',
       model: data.model || null,
       messages,
     };
   }
-
-  /** Retrieve the Claude session cookie (required for /backend_api/ calls). */
-  private async getClaudeSessionToken(): Promise<string | null> {
-    const cookies = await chrome.cookies.get({ url: 'https://claude.ai', name: 'anthropic_token' }); // anthropic_token
-    return cookies?.value || null;
-  }
-
-  /** Retrieve the Claude access token (Identity or cookie). */
-  private async getClaudeAccessToken(): Promise<string | null> {
-    const token = await this.httpClient.getCachedToken('claude'); // cached in HttpClient
-    if (token) return token;
-
-    try {
-      const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
-      const session = await sessionRes.json() as { accessToken: string } | null;
-      return session?.accessToken || null;
-    } catch {
-      return null;
-    }
-  }
-}
-
-/** Wait for captured WebSocket state messages from the injected script. */
-function waitForCapturedState(registryKey: string, timeoutMs: number): Promise<Record<string, unknown>> {
-  return new Promise(resolve => {
-    const result: Record<string, unknown> = {};
-    let done = false;
-
-    function handleMessage(event: MessageEvent): void {
-      if (done) return;
-      if (event.data?.type === registryKey + ':update') {
-        try {
-          const state = JSON.parse(String(event.data.state || ''));
-          Object.assign(result, event.data.payload);
-        } catch {}
-      }
-    }
-
-    window.addEventListener('message', handleMessage);
-    setTimeout(() => {
-      done = true;
-      window.removeEventListener('message', handleMessage);
-      resolve(result);
-    }, timeoutMs);
-  });
-}
-
-/** Wait for captured SVG widget payloads. */
-function waitForCapturedVisuals(): Promise<Array<unknown>> {
-  return new Promise(resolve => {
-    const results: Array<Record<string, unknown>> = [];
-    let done = false;
-
-    function handleMessage(event: MessageEvent): void {
-      if (done) return;
-      if (event.data?.type === 'chatgpt-export-claude-visual') {
-        results.push({ svg: event.data.svg || null, width: event.data.width || 0, height: event.data.height || 0 });
-      } else {
-        resolve([]);
-      }
-    }
-
-    window.addEventListener('message', handleMessage);
-    setTimeout(() => {
-      done = true;
-      window.removeEventListener('message', handleMessage);
-      resolve(results);
-    }, CAPTURE_TIMEOUT_MS + 10_000);
-  });
 }
