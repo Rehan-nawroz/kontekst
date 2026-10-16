@@ -58,7 +58,3 @@ npm run build
 1. Open `chrome://extensions` (or `brave://extensions`)
 2. Enable Developer mode
 3. Click "Load unpacked" and select the `/dist` directory
-
-## License
-
-MIT
