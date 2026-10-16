@@ -8,7 +8,8 @@
  */
 
 import { BaseExtractor } from "./BaseExtractor";
-import { Platform, Conversation, Message, ContentBlockType, TextContentBlock } from "../core/types";
+import { Platform, ContentBlockType } from "../core/types";
+import type { Conversation, Message, TextContentBlock } from "../core/types";
 import { HttpClient } from "../core/HttpClient";
 
 // ────────────────────── Internal node type ──────────────────────────────────
@@ -140,7 +141,7 @@ function buildBranch(data: ConversationResponse): MappingNode[] {
 
   while (id && id !== "client-created-root" && !seen.has(id)) {
     seen.add(id);
-    const node = data.mapping[id];
+    const node: MappingNode | undefined = data.mapping[id];
     if (!node) break;
     out.push({ ...node }); // shallow clone for type safety
     id = node.parent ?? undefined;
@@ -244,7 +245,7 @@ export class ChatGPTExtractor extends BaseExtractor {
 
   async isValidPage(tabId: number): Promise<boolean> {
     try {
-      const tabUrl = await (chrome.tabs.get as (id: number) => chrome.tabs.Tab | null)(tabId)?.url;
+      const tabUrl = (await chrome.tabs.get(tabId))?.url;
       if (!tabUrl) return false;
       // ChatGPT conversations live under /c/<uuid> paths.
       return (/^https:\/\/chatgpt\.com\/c\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(tabUrl));
@@ -266,7 +267,7 @@ export class ChatGPTExtractor extends BaseExtractor {
     }
 
     // Extract the conversation ID from the URL path.
-    const tab = await (chrome.tabs.get as (id: number) => chrome.tabs.Tab | null)(tabId);
+    const tab = await chrome.tabs.get(tabId);
     if (!tab?.url) throw new Error("Cannot read tab URL");
     const match = tab.url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
     if (!match) throw new Error("No active conversation");
