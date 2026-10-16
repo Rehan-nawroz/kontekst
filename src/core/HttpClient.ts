@@ -38,7 +38,8 @@ export function getOrCreateAbortController(exportId: string): {
   signal: AbortSignal;
 } {
   if (!abortRegistry) {
-    abortRegistry = (globalThis as Record<string, unknown>).__kontekstAbort ??= new Map();
+    const store = globalThis as { __kontekstAbort?: Map<string, AbortController> };
+    abortRegistry = store.__kontekstAbort ??= new Map<string, AbortController>();
   }
 
   let controller = abortRegistry.get(exportId);
@@ -68,7 +69,7 @@ function readSessionCache(scopeKey: string | null): SessionCacheEntry | null {
 /** Persist a session token into the global cache. */
 function writeSessionCache(token: string, scopeKey: string | null): void {
   const key = scopeKey ? `__kontekstAccessToken:${scopeKey}` : "__kontekstAccessToken";
-  (globalThis as Record<string, SessionCacheEntry>)[key] = {
+  (globalThis as Record<string, unknown>)[key] = {
     accessToken: token,
     updatedAt: Date.now(),
   };
@@ -179,10 +180,10 @@ export class HttpClient {
   }
 
   /** Fetch with automatic token injection and abort signal wiring. */
-  async fetch<T extends Response = FetchResponse>(
+  async fetch(
     url: string,
     init?: RequestInit & { sessionId?: string }
-  ): Promise<T> {
+  ): Promise<FetchResponse> {
     const scopeKey = init?.sessionId ?? null;
     const signal = this.getSignal() ?? init?.signal;
 
@@ -197,7 +198,7 @@ export class HttpClient {
 
     const headers = this.headersWithAuth(token) ?? {};
 
-    const response = await fetch(url, { ...init, signal, headers, credentials: "include" }) as T;
+    const response = await fetch(url, { ...init, signal, headers, credentials: "include" });
 
     if (!response.ok) {
       throw new Error(`${url}: ${response.status}`);
@@ -212,18 +213,18 @@ export class HttpClient {
     sessionId?: string
   ): Promise<T> {
     const res = await this.fetch(url, { sessionId });
-    return (res as Response).json() as Promise<T>;
+    return res.json<T>();
   }
 
   /** Convenience: fetch and parse text. */
   async fetchText(url: string, sessionId?: string): Promise<string> {
     const res = await this.fetch(url, { sessionId });
-    return (res as Response).text();
+    return res.text();
   }
 
   /** Convenience: fetch and read a Blob. */
   async fetchBlob(url: string, sessionId?: string): Promise<Blob> {
     const res = await this.fetch(url, { sessionId });
-    return (res as Response).blob();
+    return res.blob();
   }
 }
