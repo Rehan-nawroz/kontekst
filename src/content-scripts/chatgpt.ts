@@ -122,9 +122,8 @@ function findTurnContainer(msgEl: Element): HTMLElement | null {
 
   // Third: author role div as container when turn markers are missing.
   const authorRole = msgEl.closest('[data-message-author-role]') || msgEl;
-  if (authorRole) return mountedFallbackRoot(authorRole);
-
-  return null;
+  const root = mountedFallbackRoot(authorRole);
+  return root instanceof HTMLElement ? root : null;
 }
 
 /** Ensure a checkbox is injected for a given message DOM element. */
