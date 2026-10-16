@@ -1,5 +1,6 @@
 import { BaseExtractor } from './BaseExtractor';
-import { Platform, Message, ContentBlockType } from '../core/types';
+import { Platform, ContentBlockType } from '../core/types';
+import type { Message, GrokUserAssetAttachment } from '../core/types';
 
 /* ──────────────── internal types — Grok / X backend payloads ───────── */
 
@@ -103,8 +104,8 @@ function roleFromSender(sender: string | null | undefined): string {
 
 /* ──────────────── history hook — WS capture (from grok-history-hook.js) ─ */
 
-function injectHistoryHook(tabId: number): Promise<void> {
-  return chrome.scripting.executeScript({
+async function injectHistoryHook(tabId: number): Promise<void> {
+  await chrome.scripting.executeScript({
     target: { tabId }, world: 'MAIN',
     func: () => {
       const cacheKey   = '__grokExportGrokHistoryItems';
@@ -119,12 +120,22 @@ function injectHistoryHook(tabId: number): Promise<void> {
           : new Map();
 
       function remember(item: Record<string, unknown>): void {
-        const ev  = item?.event;
+        const ev = item?.event as
+          | {
+              type?: string;
+              item?: {
+                id?: unknown;
+                role?: string | null;
+                status?: string | null;
+                x_grok?: { output_chunks?: unknown[] };
+              };
+            }
+          | undefined;
         if (ev?.type !== 'conversation.history.item') return;
-        const entry   = ev.item;
-        const id      = entry?.id;
+        const entry   = ev.item ?? {};
+        const id      = entry.id;
         if (!id) return;
-        const chunks = entry?.x_grok?.output_chunks;
+        const chunks = entry.x_grok?.output_chunks;
         if (!Array.isArray(chunks) || !chunks.length) return;
         cache.set(String(id), { outputChunks: chunks, role: entry.role || null, status: entry.status || null });
       }
@@ -134,7 +145,7 @@ function injectHistoryHook(tabId: number): Promise<void> {
 
       class CachedWS extends NativeWS {
         constructor(...args: unknown[]) {
-          super(...(args as Parameters<typeof WebSocket>));
+          super(...(args as ConstructorParameters<typeof WebSocket>));
           this.addEventListener('message', (evt: MessageEvent) => {
             if (typeof evt.data !== 'string') return;
             try { remember(JSON.parse(evt.data)); } catch {}
@@ -155,7 +166,9 @@ function cardFromRaw(raw: string | Record<string, unknown>): Record<string, unkn
 }
 
 function cardId(c: Record<string, unknown>): string {
-  return c?.id || c?.image_chunk?.imageUuid || '';
+  const imageChunk = (c?.image_chunk ?? {}) as { imageUuid?: string };
+  const id = c?.id as string | undefined;
+  return id || imageChunk.imageUuid || '';
 }
 
 function urlFileName(url: string, fallback = ''): string | null {
@@ -163,14 +176,15 @@ function urlFileName(url: string, fallback = ''): string | null {
   try { const p = new URL(url).pathname.split('/').filter(Boolean); return p.length ? decodeURIComponent(p[p.length - 1]) : fallback; } catch (_) { return fallback; }
 }
 
-function userAssetAttachment(assetId: string): Record<string, unknown> {
+function userAssetAttachment(assetId: string): GrokUserAssetAttachment {
   return { source: 'grok-user-asset', id: assetId, assetId, originalName: null, title: null, mimeType: 'application/octet-stream', isImage: false };
 }
 
 function byAttachmentRef(cards: Record<string, unknown>[], id: string): string {
   const card = cards.find(c => String(cardId(c) || c.card_id || '') === id);
   if (!card?.label) return `[View ${String(id).slice(0, 8)}…]`;
-  return `![${card.label.replace(/\\|[\[\]]/g, '\\$&').replace(/[\r\n]+/g, ' ').trim()}](attachment://${id})`;
+  const label = card.label as string;
+  return `![${label.replace(/\\|[\[\]]/g, '\\$&').replace(/[\r\n]+/g, ' ').trim()}](attachment://${id})`;
 }
 
 function replaceGrokPlaceholders(text: string, cards: Record<string, unknown>[]): string {
@@ -359,7 +373,7 @@ export class GrokExtractor extends BaseExtractor {
       const coverIds  = new Set(cards.map(c => String(cardId(c))));
 
       // 2. File attachments — exclude those already represented by cards.
-      const fileAtt: Record<string, unknown>[] = (turn.fileAttachments || [])
+      const fileAtt: GrokUserAssetAttachment[] = (turn.fileAttachments || [])
         .filter(f => !coverIds.has(f))
         .map(userAssetAttachment);
 
