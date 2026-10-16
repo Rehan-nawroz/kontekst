@@ -1,7 +1,7 @@
-import { Message, Attachment } from '../core/types';
+import type { Message } from '../core/types';
 
 export class HtmlRenderer {
-  render(messages: Message[], attachments?: Attachment[]): string {
+  render(messages: Message[], attachments?: Message['attachments']): string {
     let html = `<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Chat Export</title>
 <style>
@@ -16,7 +16,7 @@ export class HtmlRenderer {
     messages.forEach(message => {
       html += `  <div class="message ${message.role}">\n`;
       html += `    <strong>${this.formatHeader(message.role)}</strong>\n`;
-      html += message.content;
+      html += message.content.map(block => block.text).join('');
       html += `  </div>\n`;
     });
 
