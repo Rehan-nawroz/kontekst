@@ -9,10 +9,9 @@
  */
 
 import { BaseExtractor } from './BaseExtractor';
-import {
-  Platform,
+import { Platform, ContentBlockType } from '../core/types';
+import type {
   Message,
-  ContentBlockType,
   TextContentBlock,
   DeepSeekUserFileAttachment,
   DeepSeekExternalImageAttachment,
