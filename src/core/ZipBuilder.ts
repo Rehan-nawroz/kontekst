@@ -1,50 +1,44 @@
-// ZIP builder using fflate library
+// ZIP builder using the fflate library.
+//
+// Files are buffered in memory and packed on demand via fflate's one-shot
+// `zipSync`, which keeps the public API (addFile / addFileSync / generate /
+// clear) stable while relying only on exports present in fflate >= 0.8.
 
 import * as fflate from 'fflate';
 
 export class ZipBuilder {
-  private zip = new fflate.Zip();
+  private files = new Map<string, Uint8Array>();
   private fileNameCounter = 0;
 
+  /** Queue a file for inclusion in the archive. */
   addFile(name: string, content: string | Uint8Array): void {
-    const data = typeof content === 'string' ? new TextEncoder().encode(content) : content;
-    this.zip.add(new fflate.ZlibData(data), name, () => {});
-    this.fileNameCounter++;
+    this.addFileSync(name, content);
   }
 
+  /** Queue a file for inclusion in the archive (kept for API parity). */
   addFileSync(name: string, content: string | Uint8Array): void {
-    const data = typeof content === 'string' ? new TextEncoder().encode(content) : content;
-    this.zip.push(name, data);
+    const data = typeof content === 'string' ? fflate.strToU8(content) : content;
+    this.files.set(name, data);
     this.fileNameCounter++;
   }
 
+  /** Pack every queued file into a ZIP blob. */
   async generate(): Promise<Blob> {
-    // Return the final zip when all files are added
-    // This will be called when users want to download
-    return new Promise((resolve, reject) => {
-      try {
-        fflate.zipGive(this.zip.files, (err: Error | null, result: Uint8Array) => {
-          if (err) {
-            reject(err);
-          } else {
-            const blob = new Blob([result], { type: 'application/zip' });
-            resolve(blob);
-          }
-        });
-      } catch (error) {
-        reject(error);
-      }
-    });
+    const entries: fflate.Zippable = {};
+    for (const [name, data] of this.files) entries[name] = data;
+    const zipped = fflate.zipSync(entries);
+    return new Blob([zipped], { type: 'application/zip' });
   }
 
-  // Generate and create download link
+  /** Pack the archive and expose it as an object URL. */
   async generateDownloadUrl(): Promise<string> {
     const blob = await this.generate();
     return URL.createObjectURL(blob);
   }
 
+  /** Reset the builder so it can be reused for another archive. */
   clear(): void {
-    this.zip = new fflate.Zip();
+    this.files.clear();
     this.fileNameCounter = 0;
   }
 }
