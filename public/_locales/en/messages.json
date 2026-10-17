@@ -1,0 +1,10 @@
+{
+  "extensionName": {
+    "message": "Kontext",
+    "description": "Name of the extension."
+  },
+  "extensionDescription": {
+    "message": "Export and contextualize AI chat conversations across platforms.",
+    "description": "Description of the extension."
+  }
+}
