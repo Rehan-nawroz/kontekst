@@ -35,15 +35,10 @@ export function App() {
 
       setStatus('Extracting...');
 
-      const [script] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: [
-          selectedPlatform === 'chatgpt'
-            ? '/src/content-scripts/chatgpt.js'
-            : '/src/content-scripts/claude.js',
-        ],
-      });
-
+      // The manifest-declared content scripts are already injected into the
+      // matching pages (chatgpt.com, claude.ai) via content_scripts. Send the
+      // extract request directly; the content script's onMessage handler answers
+      // with { success, data }.
       const result = (await chrome.tabs.sendMessage(tab.id, {
         type: 'kontext:extract',
       })) as MessageData;
@@ -52,8 +47,17 @@ export function App() {
 
       setStatus('Exporting...');
 
-      // Trigger the background script to handle export
-      await chrome.runtime.sendMessage({ type: 'kontext:trigger-export' });
+      // Forward the extracted data to the background so it can build the ZIP.
+      // Wait for the background's reply so the popup only shows success when the
+      // download was actually started (and shows the error if it failed).
+      const exportReply = (await chrome.runtime.sendMessage({
+        type: 'kontext:trigger-export',
+        data: result.data,
+      })) as { ok?: boolean; error?: string } | undefined;
+
+      if (!exportReply?.ok) {
+        throw new Error(exportReply?.error ?? 'Export failed.');
+      }
 
       setStatus(`Exported ${selectedPlatform} conversation!`);
     } catch (error) {
