@@ -18,13 +18,11 @@ import webExtension from 'vite-plugin-web-extension';
 // Adding a new content script = add it to manifest.json's content_scripts and
 // create the matching src/content-scripts/<name>.ts file.
 //
-// NOTE: DeepSeek content script is not wired up yet.
-//   src/content-scripts/deepseek.ts does not exist, so there is deliberately no
-//   entry for https://chat.deepseek.com/* in manifest.json's content_scripts.
-//   (The host permission for https://chat.deepseek.com/* is already present and
-//   will be used as soon as the script exists.) When that file is written, add
-//   a matching content_scripts entry to manifest.json — nothing else here needs
-//   to change, because this plugin derives its build inputs from the manifest.
+// NOTE: DeepSeek content script is now wired up.
+//   src/content-scripts/deepseek.ts exists and manifest.json has a matching
+//   content_scripts entry for https://chat.deepseek.com/*. The plugin derives
+//   its build inputs from the manifest, so no change to vite.config.ts is
+//   required to add DeepSeek to the build.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default defineConfig(({ mode }) => {

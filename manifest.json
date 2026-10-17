@@ -38,6 +38,11 @@
       "matches": ["https://grok.com/*"],
       "js": ["src/content-scripts/grok.ts"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://chat.deepseek.com/*"],
+      "js": ["src/content-scripts/deepseek.ts"],
+      "run_at": "document_idle"
     }
   ]
 }
