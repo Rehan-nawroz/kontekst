@@ -19,6 +19,20 @@ import type { Message } from '../core/types';
 // below is therefore not yet reachable; wiring that message handler is a separate
 // task and has intentionally not been done here.
 
+// Called by the popup after it extracts the conversation from the content script.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== 'kontext:trigger-export') return;
+
+  // The popup already waited for kontext:extract and has the data; re-forward
+  // whatever the popup passes so exportConversation stays reusable.
+  const data = (message.data ?? {}) as Record<string, unknown>;
+  exportConversation(data).then(
+    () => sendResponse({ ok: true }),
+    (err: unknown) => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }),
+  );
+  return true; // async response.
+});
+
 // Export the extracted conversation data in chosen format
 async function exportConversation(data: Record<string, unknown>): Promise<void> {
   const messages = (data.messages || []) as Array<{ role: string; content: string }>;
