@@ -39,8 +39,8 @@ export function App() {
         target: { tabId: tab.id },
         files: [
           selectedPlatform === 'chatgpt'
-            ? '/src/content-scripts/chatgpt.ts'
-            : '/src/content-scripts/claude.ts',
+            ? '/src/content-scripts/chatgpt.js'
+            : '/src/content-scripts/claude.js',
         ],
       });
 
