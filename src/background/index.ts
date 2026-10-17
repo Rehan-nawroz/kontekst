@@ -5,50 +5,19 @@ import { HtmlRenderer } from '../renderers/Html';
 import { ContentBlockType } from '../core/types';
 import type { Message } from '../core/types';
 
-// Set up popup messaging for the export flow
-chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab?.id) return;
-
-  // Determine which platform content script to inject
-  const isChatGPT = tab.url?.startsWith('https://chatgpt.com/');
-  const isClaude = tab.url?.startsWith('https://claude.ai/');
-
-  if (!isChatGPT && !isClaude) {
-    chrome.notifications.create({
-      type: 'basic',
-      iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
-      title: 'Kontext',
-      message: 'Please open a ChatGPT or Claude conversation page.',
-    });
-    return;
-  }
-
-  const scriptFile = isChatGPT ? '/src/content-scripts/chatgpt.ts' : '/src/content-scripts/claude.ts';
-
-  // Inject the content script (if not already loaded) and extract data
-  try {
-    const [message] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: [`/${scriptFile}`],
-    });
-
-    // Query for the extracted response
-    const result = await chrome.tabs.sendMessage(tab.id, { type: 'kontext:extract' });
-
-    if (!result?.success) {
-      throw new Error(result?.error || 'Extraction failed or not supported on this page.');
-    }
-
-    await exportConversation(result.data);
-  } catch (error) {
-    chrome.notifications.create({
-      type: 'basic',
-      iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
-      title: 'Kontext',
-      message: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-    });
-  }
-});
+// ─────────────────────────── Toolbar icon action ──────────────────────────────
+//
+// Decision (action-handler conflict): the toolbar icon opens the POPUP.
+// manifest.json declares action.default_popup => src/popup/index.html, and Chrome
+// never fires chrome.action.onClicked while a default_popup is set. The previous
+// onClicked listener here was therefore unreachable code, so it has been removed
+// rather than left alongside the popup.
+//
+// Consequence to be aware of: the popup performs injection + extraction itself and
+// then sends { type: 'kontext:trigger-export' } to this service worker, but this
+// worker has no chrome.runtime.onMessage listener for it yet. exportConversation
+// below is therefore not yet reachable; wiring that message handler is a separate
+// task and has intentionally not been done here.
 
 // Export the extracted conversation data in chosen format
 async function exportConversation(data: Record<string, unknown>): Promise<void> {
