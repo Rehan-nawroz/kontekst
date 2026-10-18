@@ -252,44 +252,124 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 /** Extract all currently visible messages into a simple array for the popup/background. */
 function extractChatGPTData(): Promise<Record<string, unknown>> {
-  // Each message is authored by an element carrying data-message-author-role
-  // ("user" | "assistant" | "system"). Query those directly — the role lives on
-  // the message element itself, NOT on the conversation-turn wrapper.
-  const messageEls = Array.from(
-    document.querySelectorAll<HTMLElement>('[data-message-author-role]'),
-  );
-
   const messages: Array<{ role: string; content: string; messageId: string }> = [];
+  const seenText = new Set<string>();
 
-  for (const el of messageEls) {
-    const role = (el.getAttribute('data-message-author-role') || '').toLowerCase();
-    if (role !== 'user' && role !== 'assistant') continue;
+  const push = (role: string, content: string, messageId: string): void => {
+    const normalisedRole = role.toLowerCase();
+    if (normalisedRole !== 'user' && normalisedRole !== 'assistant') return;
+    const text = content.trim();
+    if (!text) return;
+    // Same node can surface through several strategies/wrappers — keep it once.
+    if (seenText.has(text)) return;
+    seenText.add(text);
+    messages.push({
+      role: normalisedRole,
+      content: text,
+      messageId: messageId || `msg-${messages.length}`,
+    });
+  };
 
-    // Assistant content is rendered as formatted markdown; user content is
-    // plain text. Prefer the inner .markdown node, else fall back to the whole
-    // message element. Use innerText so the export is readable prose, not HTML.
-    const contentEl = el.querySelector<HTMLElement>('.markdown, [class*="prose"]') || el;
-    const content = (contentEl.innerText || '').trim();
-    if (!content) continue;
-
-    const messageId =
-      el.getAttribute('data-message-id') ||
-      el.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') ||
-      `msg-${messages.length}`;
-
-    // Skip exact-duplicate consecutive entries (ChatGPT sometimes renders the
-    // same message node twice under different wrappers).
-    const prev = messages[messages.length - 1];
-    if (prev && prev.role === role && prev.content === content) continue;
-
-    messages.push({ role, content, messageId });
+  // ChatGPT is a SPA that has shipped several DOM shapes over time, and some
+  // builds nest the conversation in a same-origin <iframe>. Collect every
+  // document we can legally read so the strategies run against all of them.
+  const docs: Document[] = [document];
+  for (const frame of Array.from(document.querySelectorAll('iframe'))) {
+    try {
+      const frameDoc = frame.contentDocument;
+      if (frameDoc?.body) docs.push(frameDoc);
+    } catch {
+      // Cross-origin frame — not readable, skip.
+    }
   }
+
+  const textOf = (el: Element | null): string => {
+    if (!el) return '';
+    const contentEl =
+      el.querySelector<HTMLElement>('.markdown, [class*="prose"], [class*="whitespace-pre-wrap"]') ||
+      (el as HTMLElement);
+    return contentEl.innerText || '';
+  };
+
+  // Diagnostics — always collected so a failed export can report what the DOM
+  // actually contained instead of just "no messages".
+  const counts = { roleAttr: 0, turns: 0, markdown: 0, prose: 0, preWrap: 0 };
+  for (const doc of docs) {
+    counts.roleAttr += doc.querySelectorAll('[data-message-author-role]').length;
+    counts.turns += doc.querySelectorAll('[data-testid^="conversation-turn-"]').length;
+    counts.markdown += doc.querySelectorAll('.markdown').length;
+    counts.prose += doc.querySelectorAll('[class*="prose"]').length;
+    counts.preWrap += doc.querySelectorAll('[class*="whitespace-pre-wrap"]').length;
+  }
+
+  let strategy = 'none';
+
+  // Strategy 1: elements that carry data-message-author-role directly — the
+  // role lives on the message element, not on the conversation-turn wrapper.
+  for (const doc of docs) {
+    if (messages.length) break;
+    const roleEls = Array.from(doc.querySelectorAll<HTMLElement>('[data-message-author-role]'));
+    for (const el of roleEls) {
+      push(
+        el.getAttribute('data-message-author-role') || '',
+        textOf(el),
+        el.getAttribute('data-message-id') ||
+          el.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') ||
+          '',
+      );
+    }
+    if (messages.length) strategy = 'role-attr';
+  }
+
+  // Strategy 2: conversation-turn wrappers (role sits on a descendant; if the
+  // attribute is absent entirely, infer it from the content shape — assistant
+  // replies render as formatted markdown, user prompts as plain text).
+  if (!messages.length) {
+    for (const doc of docs) {
+      if (messages.length) break;
+      const turns = Array.from(doc.querySelectorAll<HTMLElement>('[data-testid^="conversation-turn-"]'));
+      for (const turn of turns) {
+        const roleEl = turn.matches('[data-message-author-role]')
+          ? turn
+          : turn.querySelector<HTMLElement>('[data-message-author-role]');
+        const role =
+          roleEl?.getAttribute('data-message-author-role') ||
+          (turn.querySelector('.markdown, [class*="prose"]') ? 'assistant' : 'user');
+        push(role, textOf(turn), turn.getAttribute('data-testid') || '');
+      }
+      if (messages.length) strategy = 'turns';
+    }
+  }
+
+  // Strategy 3: bare content blocks — neither attribute exists in this build.
+  if (!messages.length) {
+    for (const doc of docs) {
+      for (const el of doc.querySelectorAll<HTMLElement>('.markdown, [class*="prose"]')) {
+        push('assistant', el.innerText || '', '');
+      }
+      for (const el of doc.querySelectorAll<HTMLElement>('[class*="whitespace-pre-wrap"]')) {
+        push('user', el.innerText || '', '');
+      }
+    }
+    if (messages.length) strategy = 'content-blocks';
+  }
+
+  const diagnostics = {
+    strategyUsed: strategy,
+    frames: docs.length,
+    iframes: document.querySelectorAll('iframe').length,
+    inIframe: window !== window.top,
+    href: location.href,
+    counts,
+    extracted: messages.length,
+  };
 
   return Promise.resolve({
     platform: 'chatgpt',
     messages,
     pageCount: messages.length,
     extractedAt: new Date().toISOString(),
+    diagnostics,
   });
 }
 
