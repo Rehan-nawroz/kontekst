@@ -14,10 +14,10 @@ import type { Message } from '../core/types';
 // rather than left alongside the popup.
 //
 // Consequence to be aware of: the popup performs injection + extraction itself and
-// then sends { type: 'kontext:trigger-export' } to this service worker, but this
-// worker has no chrome.runtime.onMessage listener for it yet. exportConversation
-// below is therefore not yet reachable; wiring that message handler is a separate
-// task and has intentionally not been done here.
+// then sends { type: 'kontext:trigger-export' } to this service worker. The
+// chrome.runtime.onMessage listener below handles that message and forwards the
+// extracted data to exportConversation, which builds the Markdown + HTML files,
+// packs them into a ZIP, and starts the download.
 
 // Called by the popup after it extracts the conversation from the content script.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -40,7 +40,7 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
   if (messages.length === 0) {
     chrome.notifications.create({
       type: 'basic',
-      iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
+      iconUrl: chrome.runtime.getURL('icons/icon128.png'),
       title: 'Kontext',
       message: 'No messages found in this conversation.',
     });
@@ -86,7 +86,7 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
 
   chrome.notifications.create({
     type: 'basic',
-    iconUrl: chrome.runtime.getURL('icons/icon-128.png'),
+    iconUrl: chrome.runtime.getURL('icons/icon128.png'),
     title: 'Kontext',
     message: `${messages.length} messages exported successfully!`,
   });
