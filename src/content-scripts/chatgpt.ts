@@ -252,27 +252,43 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 /** Extract all currently visible messages into a simple array for the popup/background. */
 function extractChatGPTData(): Promise<Record<string, unknown>> {
-  // Gather per-turn data — filtered by selectedMessages only.
-  const allTurns: NodeListOf<HTMLElement> = document.querySelectorAll('[data-testid^="conversation-turn-"]');
+  // Each message is authored by an element carrying data-message-author-role
+  // ("user" | "assistant" | "system"). Query those directly — the role lives on
+  // the message element itself, NOT on the conversation-turn wrapper.
+  const messageEls = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-message-author-role]'),
+  );
+
   const messages: Array<{ role: string; content: string; messageId: string }> = [];
 
-  allTurns.forEach(turn => {
-    // Determine user vs assistant by author-marker class on the turn or its child.
-    const isUser = /user/i.test(turn.getAttribute('data-message-author-role') || '');
-    // Extract text from first prose element inside the turn.
-    const contentEl = turn.querySelector('[class*="prose"], .markdown');
-    if (!contentEl) return;
+  for (const el of messageEls) {
+    const role = (el.getAttribute('data-message-author-role') || '').toLowerCase();
+    if (role !== 'user' && role !== 'assistant') continue;
 
-    const role = isUser ? 'user' : 'assistant';
-    const messageId = turn.getAttribute('data-message-id') || turn.getAttribute('data-turn-id') || '';
-    messages.push({ role, content: contentEl.innerHTML, messageId });
-  });
+    // Assistant content is rendered as formatted markdown; user content is
+    // plain text. Prefer the inner .markdown node, else fall back to the whole
+    // message element. Use innerText so the export is readable prose, not HTML.
+    const contentEl = el.querySelector<HTMLElement>('.markdown, [class*="prose"]') || el;
+    const content = (contentEl.innerText || '').trim();
+    if (!content) continue;
 
-  // Count pages and extract metadata.
+    const messageId =
+      el.getAttribute('data-message-id') ||
+      el.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') ||
+      `msg-${messages.length}`;
+
+    // Skip exact-duplicate consecutive entries (ChatGPT sometimes renders the
+    // same message node twice under different wrappers).
+    const prev = messages[messages.length - 1];
+    if (prev && prev.role === role && prev.content === content) continue;
+
+    messages.push({ role, content, messageId });
+  }
+
   return Promise.resolve({
     platform: 'chatgpt',
     messages,
-    pageCount: allTurns.length,
+    pageCount: messages.length,
     extractedAt: new Date().toISOString(),
   });
 }

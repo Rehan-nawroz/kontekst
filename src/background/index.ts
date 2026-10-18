@@ -38,13 +38,8 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
   const messages = (data.messages || []) as Array<{ role: string; content: string }>;
 
   if (messages.length === 0) {
-    chrome.notifications.create({
-      type: 'basic',
-      iconUrl: chrome.runtime.getURL('icons/icon128.png'),
-      title: 'Kontext',
-      message: 'No messages found in this conversation.',
-    });
-    return;
+    // Throw so the popup surfaces a real error instead of a false "Exported!".
+    throw new Error('No messages found in this conversation.');
   }
 
   const zipBuilder = new ZipBuilder();
