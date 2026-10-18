@@ -73,7 +73,10 @@ function checkboxHost(row: HTMLElement): HTMLElement | null {
 
 /** Inject a styled checkbox into one transcript row element. */
 function addCheckbox(item: { row: HTMLElement; index: number }): void {
-  if (item.row.querySelector('__kontekst-cb')) return; // already injected.
+  // NB: class selector needs the leading '.' — without it this is a tag-name
+  // query for <__kontekst-cb>, which never matches, so the guard below would
+  // fail and every refresh would append another checkbox.
+  if (item.row.querySelector('._kontekst-cb')) return; // already injected.
 
   const host = checkboxHost(item.row);
   if (!host) return;
@@ -128,7 +131,7 @@ function addCheckbox(item: { row: HTMLElement; index: number }): void {
 function refreshMounted(): void {
   for (const item of rows()) {
     if (enabled) addCheckbox(item);
-    const box = item.row.querySelector('__kontekst-cb');
+    const box = item.row.querySelector('._kontekst-cb');
     if (box instanceof HTMLInputElement) {
       box.checked = isSelected(item.index);
       box.style.display = enabled ? 'block' : 'none';
@@ -292,6 +295,28 @@ async function extractClaudeData(): Promise<Record<string, unknown>> {
     messages,
     extractedAt: new Date().toISOString(),
   };
+}
+
+/* ──────────── auto-mount on first paint ══════════ */
+
+/**
+ * Mount the selection UI as soon as the page is ready.
+ *
+ * Unlike before, the checkboxes no longer wait for a popup toggle — this runs
+ * on load, matching chatgpt.ts / grok.ts / deepseek.ts. ensureObserver() picks
+ * up Claude's virtualized/streaming rows afterwards.
+ */
+function initClaudeSelection(): void {
+  enabled = true;
+  ensureObserver();
+  refreshMounted();
+  console.log('[Kontext] Claude selection UI active.');
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initClaudeSelection);
+} else {
+  initClaudeSelection();
 }
 
 console.log('[Kontext] Claude content script loaded — DOM selection active.');
