@@ -39,7 +39,11 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
 
   if (messages.length === 0) {
     // Throw so the popup surfaces a real error instead of a false "Exported!".
-    throw new Error('No messages found in this conversation.');
+    // Include the content script's DOM diagnostics so a failed export explains
+    // which selectors were found (and in which frame), not just "no messages".
+    const diagnostics = data.diagnostics;
+    const detail = diagnostics ? ` [DOM: ${JSON.stringify(diagnostics)}]` : '';
+    throw new Error(`No messages found in this conversation.${detail}`);
   }
 
   const zipBuilder = new ZipBuilder();
