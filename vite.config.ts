@@ -36,6 +36,12 @@ export default defineConfig(({ mode }) => {
       }),
       preact(),
     ],
+    // Vite's default base is '/', which rewrites the popup's relative
+    // `./App.tsx` script tag into an ABSOLUTE `/src/popup/index.js` URL. Chrome
+    // extensions have no root origin, so that fetch 404s and Preact silently
+    // never mounts (the popup renders an empty box with zero console errors).
+    // './' keeps every emitted asset URL relative to the file that references it.
+    base: './',
     build: {
       outDir: 'dist',
       // The plugin forbids the individual builds from emptying dist/ (it runs
