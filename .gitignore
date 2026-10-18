@@ -21,3 +21,9 @@ ai-chat-export-main/
 
 # Freebuff workspace metadata
 .freebuff/
+
+# Local Playwright test harnesses (require playwright, which is not a
+# devDependency — they cannot run from a fresh npm install)
+test-extension.cjs
+verify-icons.cjs
+test-deepseek-selection.cjs
