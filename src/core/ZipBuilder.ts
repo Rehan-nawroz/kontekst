@@ -30,12 +30,6 @@ export class ZipBuilder {
     return new Blob([zipped], { type: 'application/zip' });
   }
 
-  /** Pack the archive and expose it as an object URL. */
-  async generateDownloadUrl(): Promise<string> {
-    const blob = await this.generate();
-    return URL.createObjectURL(blob);
-  }
-
   /** Reset the builder so it can be reused for another archive. */
   clear(): void {
     this.files.clear();
