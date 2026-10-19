@@ -4,7 +4,10 @@ export {};
  * Content script for Claude conversations — DOM selection & checkbox UI injection.
  */
 
-import { downloadAttachment } from '../core/attachments';
+import { downloadAttachment, finalizeAttachmentName } from '../core/attachments';
+import { claudeMessageAttachments } from '../core/platform-attachments';
+import type { ClaudeAttachmentDescriptor } from '../core/platform-attachments';
+import type { DownloadResult } from '../core/attachments';
 import type { ExtractedAttachment } from '../core/types';
 
 // ──────────────── state ───────────────────────────────────────────────
@@ -274,13 +277,163 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
 
 /* ──────────────── extract (placeholder for now) ───────────────── */
 
-/* ──────── attachment extraction (DOM-scraped uploads) ────────────────────
+/* ──────── attachment extraction (reference: claude-api.js + claude-normalize) ──
  *
- * Claude renders user uploads inside the transcript row: pasted images are
- * <img> elements whose src points at /api/uploads/… (or a page-local blob:
- * URL), and uploaded files are <a> download links to the same area. Both are
- * collected per row and downloaded with the page's session cookies.
+ * Claude-hosted files are NOT downloadable from the DOM — the reference
+ * exporter resolves them through the conversation JSON:
+ *
+ *   GET /api/organizations/{org}/chat_conversations/{id}?tree=True…
+ *   → active branch via current_leaf_message_uuid + parent_message_uuid
+ *   → `tool_result` items carrying `local_resource` (file_path)  →
+ *       GET /api/organizations/{org}/conversations/{id}/wiggle/download-file?path=…
+ *   → `image_gallery` items (remote images) → fetched best-effort (CORS)
+ *
+ * On top of that we keep a DOM scrape of user-row uploads as a fallback (the
+ * JSON is the source of truth, but uploads render as <img>/<a> too). Every
+ * descriptor carries a stable `key` so the same file is never downloaded
+ * twice. Row ↔ message alignment uses the row's data-index attribute, which
+ * matches the active-branch order.
  * ────────────────────────────────────────────────────────────────────────── */
+
+interface ClaudeOrgConversationPayload {
+  uuid?: string;
+  chat_messages?: Array<{ uuid?: string; parent_message_uuid?: string; sender?: string; content?: unknown }>;
+  current_leaf_message_uuid?: string;
+}
+
+let claudeOrgIdCache: string | null = null;
+
+/** Discover the organization id the page itself uses for this conversation. */
+async function discoverClaudeOrganizationId(conversationId: string): Promise<string> {
+  if (claudeOrgIdCache) return claudeOrgIdCache;
+
+  // 1. Same organization the page already called (resource timing entries).
+  const marker = `/chat_conversations/${conversationId}`;
+  const resources = performance.getEntriesByType('resource').map(entry => entry.name);
+  for (let i = resources.length - 1; i >= 0; i--) {
+    try {
+      const url = new URL(resources[i], location.href);
+      if (!url.pathname.includes(marker)) continue;
+      const parts = url.pathname.split('/');
+      const orgIndex = parts.indexOf('organizations');
+      if (orgIndex >= 0 && parts[orgIndex + 1]) {
+        claudeOrgIdCache = decodeURIComponent(parts[orgIndex + 1]);
+        return claudeOrgIdCache;
+      }
+    } catch {
+      // malformed entry — keep scanning
+    }
+  }
+
+  // 2. Fall back to the account's organization list (reference behaviour).
+  try {
+    const response = await fetch('/api/organizations', { credentials: 'include' });
+    if (response.ok) {
+      const data = (await response.json()) as Record<string, unknown>;
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.organizations)
+          ? (data.organizations as Array<Record<string, unknown>>)
+          : [];
+      const first = list[0];
+      const id = String(first?.uuid || first?.id || first?.organization_id || '');
+      if (id) {
+        claudeOrgIdCache = id;
+        return id;
+      }
+    }
+  } catch {
+    // reported by the caller as a missing-organization error
+  }
+  return '';
+}
+
+/** Fetch the conversation and return its active branch in chronological order. */
+async function fetchClaudeBranch(
+  conversationId: string,
+  organizationId: string,
+): Promise<Array<Record<string, unknown>>> {
+  if (!organizationId) throw new Error('Claude organization id was not found');
+
+  const query =
+    '?tree=True&rendering_mode=messages&render_all_tools=true' +
+    '&include_inline_comparison=true&consistency=strong';
+  const response = await fetch(
+    `/api/organizations/${encodeURIComponent(organizationId)}` +
+    `/chat_conversations/${encodeURIComponent(conversationId)}${query}`,
+    { credentials: 'include' },
+  );
+  if (!response.ok) throw new Error(`Claude conversation GET: ${response.status}`);
+  const data = (await response.json()) as ClaudeOrgConversationPayload;
+
+  // Reconstruct the active branch: current_leaf → parent links → root.
+  const messages = Array.isArray(data.chat_messages) ? data.chat_messages : [];
+  const byId = new Map(messages.map(message => [String(message.uuid ?? ''), message]));
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  let id = String(data.current_leaf_message_uuid ?? '');
+  while (id && !seen.has(id)) {
+    seen.add(id);
+    const message = byId.get(id);
+    if (!message) break;
+    ids.push(id);
+    const parent = String(message.parent_message_uuid ?? '');
+    if (!parent || parent === '00000000-0000-4000-8000-000000000000') break;
+    id = parent;
+  }
+  return ids.reverse().map(leafId => byId.get(leafId) as Record<string, unknown>);
+}
+
+/** Download one descriptor from any point of the Claude attachment flow. */
+async function downloadClaudeDescriptor(
+  descriptor: ClaudeAttachmentDescriptor,
+  organizationId: string,
+  conversationId: string,
+): Promise<DownloadResult> {
+  switch (descriptor.kind) {
+    case 'local-resource': {
+      if (!organizationId || !conversationId) {
+        return { attachment: null, error: 'missing organization/conversation context' };
+      }
+      const params = new URLSearchParams({ path: descriptor.filePath });
+      const url =
+        `/api/organizations/${encodeURIComponent(organizationId)}` +
+        `/conversations/${encodeURIComponent(conversationId)}` +
+        `/wiggle/download-file?${params}`;
+      return downloadAttachment(url, {
+        filename: descriptor.originalName,
+        mimeType: descriptor.mimeType,
+      });
+    }
+
+    case 'remote-image': {
+      // Third-party/image-search URLs: fetch without cookies, validate image type.
+      const result = await downloadAttachment(descriptor.url, {
+        filename: descriptor.originalName,
+        mimeType: descriptor.mimeType,
+        credentials: 'omit',
+      });
+      if (!result.attachment) return result;
+      const mimeType = result.attachment.mimeType || '';
+      if (mimeType && !mimeType.startsWith('image/')) {
+        return { attachment: null, error: `non-image content: ${mimeType}` };
+      }
+      return result;
+    }
+
+    case 'inline-image': {
+      // Inline base64 image block — no download required.
+      const mimeType = descriptor.mimeType || 'image/png';
+      return {
+        attachment: {
+          filename: finalizeAttachmentName(descriptor.originalName ?? 'image', mimeType),
+          mimeType,
+          dataBase64: descriptor.dataBase64,
+        },
+      };
+    }
+  }
+}
 
 /** Collect upload URLs (images + file links) inside one transcript row. */
 function rowAttachmentUrls(row: HTMLElement): Array<{ url: string; filename: string | null }> {
@@ -294,19 +447,27 @@ function rowAttachmentUrls(row: HTMLElement): Array<{ url: string; filename: str
     } catch {
       return;
     }
-    // Only chase Claude-hosted uploads and page-local blobs — external
-    // images embedded in the conversation are not user attachments.
+    // Accept Claude-hosted uploads (/api/uploads/…), page-local blobs from a
+    // fresh paste, and claude.ai/anthropic-hosted images — while skipping
+    // decorative emoji/avatar/favicon assets that also live on the host.
     const isUpload = /\/api\/uploads\//.test(url);
     const isBlob = url.startsWith('blob:');
-    if (!isUpload && !isBlob) return;
+    let isClaudeHosted = false;
+    try {
+      const host = new URL(url).hostname;
+      isClaudeHosted = /(^|\.)claude\.ai$/.test(host) || /(^|\.)anthropic\.com$/.test(host);
+    } catch {
+      isClaudeHosted = false;
+    }
+    const isDecor = /\/(?:emoji|avatars?|favicon|logo|icons?)\//i.test(url);
+    if (!isUpload && !isBlob && !isClaudeHosted) return;
+    if (!isUpload && !isBlob && isDecor) return;
     if (seen.has(url)) return;
     seen.add(url);
     out.push({ url, filename });
   };
 
   for (const img of row.querySelectorAll('img')) {
-    // Emoji/react images are tiny and served from static asset hosts, which
-    // the isUpload check already excludes; blob: covers pasted images.
     add(img.getAttribute('src'), (img.getAttribute('alt') || '').trim() || null);
   }
   for (const link of row.querySelectorAll('a[href]')) {
@@ -330,31 +491,75 @@ async function extractClaudeData(
   }> = [];
   const attachmentErrors: string[] = [];
 
+  // 1. Conversation-API attachments, indexed by active-branch position. The
+  //    row's data-index attribute is the branch index, so a virtualized DOM
+  //    still maps rows → messages correctly.
+  const conversationUuid = conversationId();
+  let organizationId = '';
+  let apiByIndex: ClaudeAttachmentDescriptor[][] = [];
+  if (options.includeAttachments && conversationUuid) {
+    try {
+      organizationId = await discoverClaudeOrganizationId(conversationUuid);
+      const branch = await fetchClaudeBranch(conversationUuid, organizationId);
+      apiByIndex = branch.map(message => claudeMessageAttachments(message, conversationUuid));
+      console.log('[Kontext] claude attachment diag:', JSON.stringify({
+        organizationId,
+        branchMessages: branch.length,
+        domRows: messageRows.length,
+        perMessage: apiByIndex.map(list => list.map(d => d.kind)),
+      }));
+    } catch (error) {
+      attachmentErrors.push(`conversation API: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   for (const { row } of messageRows) {
     const article = row.querySelector('[role="article"]');
-    if (!article) continue;
-    const textContent = article.textContent?.trim() || '';
-    if (!textContent) continue;
+    const textContent = article?.textContent?.trim() || '';
 
     // Determine user vs assistant by Claude's role markers.
     const isUser = /human|user/i.test(row.getAttribute('data-testid') || '');
 
-    // Uploads appear on user turns; download them when the popup asked for it.
+    // Attachments come from the conversation JSON (files/galleries/images),
+    // plus a DOM scrape of user-row uploads as fallback. Computed BEFORE the
+    // text check so a file-only message still exports.
     let attachments: ExtractedAttachment[] | undefined;
-    if (options.includeAttachments && isUser) {
-      const targets = rowAttachmentUrls(row);
-      if (targets.length) {
-        attachments = [];
-        for (const target of targets) {
+    if (options.includeAttachments) {
+      const downloaded: ExtractedAttachment[] = [];
+      const seenKeys = new Set<string>();
+
+      const index = Number(row.getAttribute('data-index'));
+      const descriptors = Number.isInteger(index) && index >= 0 ? apiByIndex[index] ?? [] : [];
+      for (const descriptor of descriptors) {
+        if (seenKeys.has(descriptor.key)) continue;
+        seenKeys.add(descriptor.key);
+        const { attachment, error } = await downloadClaudeDescriptor(
+          descriptor,
+          organizationId,
+          conversationUuid ?? '',
+        );
+        if (attachment) downloaded.push(attachment);
+        else attachmentErrors.push(`${descriptor.originalName ?? descriptor.key}: ${error}`);
+      }
+
+      if (isUser) {
+        for (const target of rowAttachmentUrls(row)) {
+          const key = `dom:${target.url}`;
+          if (seenKeys.has(key)) continue;
+          seenKeys.add(key);
           const { attachment, error } = await downloadAttachment(target.url, {
             filename: target.filename,
           });
-          if (attachment) attachments.push(attachment);
+          if (attachment) downloaded.push(attachment);
           else attachmentErrors.push(`${target.filename ?? target.url}: ${error}`);
         }
-        if (!attachments.length) attachments = undefined;
       }
+
+      if (downloaded.length) attachments = downloaded;
     }
+
+    if (!article) continue;
+    if (!textContent && !attachments) continue;
 
     messages.push({
       role: isUser ? 'user' : 'assistant',
@@ -365,7 +570,7 @@ async function extractClaudeData(
 
   return {
     platform: 'claude',
-    conversationId: conversationId(),
+    conversationId: conversationUuid,
     messages,
     extractedAt: new Date().toISOString(),
     ...(attachmentErrors.length ? { attachmentErrors } : {}),
