@@ -27,3 +27,4 @@ ai-chat-export-main/
 test-extension.cjs
 verify-icons.cjs
 test-deepseek-selection.cjs
+/screenshots
