@@ -127,13 +127,18 @@ export async function downloadAttachment(
     mimeType?: string | null;
     headers?: Record<string, string>;
     signal?: AbortSignal;
+    /** Referrer to send (e.g. "https://grok.com/") — Grok's asset CDN checks it. */
+    referrer?: string;
+    /** Defaults to 'include'; signed CDN URLs need 'omit' (DeepSeek, Grok files). */
+    credentials?: RequestCredentials;
   } = {},
 ): Promise<DownloadResult> {
   let response: Response;
   try {
     response = await fetch(url, {
-      credentials: 'include',
+      credentials: options.credentials ?? 'include',
       headers: options.headers,
+      referrer: options.referrer,
       signal: options.signal,
     });
   } catch (err) {
