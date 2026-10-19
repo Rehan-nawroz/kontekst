@@ -4,6 +4,9 @@ export {};
  * Content script for Grok conversations — DOM selection & checkbox UI injection.
  */
 
+import { downloadAttachment } from '../core/attachments';
+import type { ExtractedAttachment } from '../core/types';
+
 // ──────────────── state ───────────────────────────────────────────────
 
 const selectedMessageIds = new Set<string>();
@@ -299,14 +302,70 @@ function initGrokSelection(): void {
       respond({ ok: true });
       return true;
     }
+
+    if (msg.type === 'kontext:extract') {
+      extractGrokData({ includeAttachments: !!msg.includeAttachments }).then(
+        data => respond({ success: true, data }),
+        error => respond({
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      return true;
+    }
   });
 }
 
 // ────── data extraction for export ─────────── */
 
-function extractGrokData(): Record<string, unknown> {
+/* ──────── attachment extraction (user-uploaded images) ───────────────────
+ *
+ * Grok renders pasted/uploaded images as <img> elements inside the user
+ * message container; remote uploads live on grok.com/x.ai hosts and freshly
+ * pasted ones on page-local blob: URLs. Both are collected per turn and
+ * downloaded with the page's cookies.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** Collect user-upload image URLs inside one response turn. */
+function turnAttachmentUrls(turn: Element): Array<{ url: string; filename: string | null }> {
+  const out: Array<{ url: string; filename: string | null }> = [];
+  const seen = new Set<string>();
+
+  const userEl = turn.querySelector('[data-testid="user-message"]');
+  if (!userEl) return out; // assistant turns don't carry user uploads.
+
+  for (const img of userEl.querySelectorAll('img')) {
+    const raw = img.getAttribute('src');
+    if (!raw) continue;
+    let url: string;
+    try {
+      url = new URL(raw, location.href).href;
+    } catch {
+      continue;
+    }
+    // Remote uploads are same-site; freshly pasted images are blob: URLs.
+    const isRemote = url.startsWith('https://grok.com/') || url.startsWith('https://x.ai/');
+    const isBlob = url.startsWith('blob:');
+    if (!isRemote && !isBlob) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    const alt = (img.getAttribute('alt') || '').trim() || null;
+    out.push({ url, filename: alt });
+  }
+
+  return out;
+}
+
+async function extractGrokData(
+  options: { includeAttachments?: boolean } = {},
+): Promise<Record<string, unknown>> {
   const items = turnItems();
-  const messages: Array<{ role: string; content: string }> = [];
+  const messages: Array<{
+    role: string;
+    content: string;
+    attachments?: ExtractedAttachment[];
+  }> = [];
+  const attachmentErrors: string[] = [];
 
   for (const item of items) {
     // Look for the message text element inside the response turn.
@@ -324,9 +383,27 @@ function extractGrokData(): Record<string, unknown> {
     const hasRoleAttr = (roleEl?.getAttribute('data-testid') || '');
     const isUser = /user/i.test(hasRoleAttr);
 
+    // Download this turn's user uploads when the popup asked for them.
+    let attachments: ExtractedAttachment[] | undefined;
+    if (options.includeAttachments && isUser) {
+      const targets = turnAttachmentUrls(item.turn);
+      if (targets.length) {
+        attachments = [];
+        for (const target of targets) {
+          const { attachment, error } = await downloadAttachment(target.url, {
+            filename: target.filename,
+          });
+          if (attachment) attachments.push(attachment);
+          else attachmentErrors.push(`${target.filename ?? target.url}: ${error}`);
+        }
+        if (!attachments.length) attachments = undefined;
+      }
+    }
+
     messages.push({
       role: isUser ? 'user' : 'assistant',
       content: innerHTML,
+      ...(attachments ? { attachments } : {}),
     });
   }
 
@@ -337,6 +414,7 @@ function extractGrokData(): Record<string, unknown> {
     messages,
     totalCount: totalMessageCount(),
     extractedAt: new Date().toLocaleString(),
+    ...(attachmentErrors.length ? { attachmentErrors } : {}),
     orderedIds,
     selectedTurnIds: [], // legacy
     excludedTurnIds: [], // legacy
