@@ -250,127 +250,175 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
-/** Extract all currently visible messages into a simple array for the popup/background. */
-function extractChatGPTData(): Promise<Record<string, unknown>> {
+/* ──────── REST-API extraction (reference: chatgpt-api.js + conversation.js) ─────
+ *
+ * The reference exporter does NOT scrape message text from the DOM — it fetches
+ * the conversation as JSON from /backend-api/conversation/<id> (auth token from
+ * /api/auth/session) and walks the `mapping` tree from `current_node`. The DOM is
+ * only used for the checkbox selection UI. Scraping DOM text is the fragile path
+ * that breaks whenever ChatGPT changes its markup, so we follow the reference and
+ * read the same API the page itself uses. This content script already runs on the
+ * chatgpt.com origin, so a relative fetch carries the session cookie.
+ * ────────────────────────────────────────────────────────────────────────────── */
+
+interface ApiContent {
+  content_type?: string;
+  text?: string;
+  parts?: unknown[];
+}
+
+interface ApiMessage {
+  id: string;
+  author?: { role?: string };
+  content?: ApiContent;
+  recipient?: string;
+  create_time?: number | string;
+  metadata?: Record<string, unknown>;
+}
+
+interface ApiNode {
+  id: string;
+  parent?: string | null;
+  message?: ApiMessage;
+}
+
+interface ApiConversation {
+  current_node?: string;
+  mapping?: Record<string, ApiNode>;
+  conversation_id?: string;
+  title?: string;
+}
+
+/** Internal content types the reference hides from the export (conversation.js). */
+const HIDDEN_CONTENT_TYPES = [
+  'reasoning_recap',
+  'thoughts',
+  'system_error',
+  'model_editable_context',
+  'computer_initialize_state',
+];
+
+/** Mirror of the reference's isVisibleMessage — keep only conversational turns. */
+function isApiVisibleMessage(msg: ApiMessage): boolean {
+  const role = msg.author?.role;
+  const type = msg.content?.content_type || '';
+  if (HIDDEN_CONTENT_TYPES.includes(type)) return false;
+  if (role === 'user') return true;
+  if (role === 'assistant') {
+    // Assistant messages addressed to a specific tool are internal plumbing.
+    const recipient = typeof msg.recipient === 'string' ? msg.recipient.trim() : '';
+    return !recipient || recipient === 'all';
+  }
+  // tool / system / unknown roles are service records, not conversational text.
+  return false;
+}
+
+/** Mirror of the reference's textParts + cleanExportText. */
+function apiTextParts(msg: ApiMessage): string[] {
+  const c = msg.content || {};
+  const isUser = msg.author?.role === 'user';
+  const clean = (t: string): string =>
+    isUser
+      ? t
+      : t.replaceAll('\uE200memcite\uE201', '').replace(/\uE200cite(?:\uE202[^\uE201]*)*\uE201/g, '');
+
+  const out: string[] = [];
+  if (Array.isArray(c.parts)) {
+    for (const p of c.parts) {
+      if (typeof p !== 'string') continue; // skip multimodal object parts
+      const t = clean(p);
+      if (t.trim()) out.push(t);
+    }
+  } else if (typeof c.text === 'string') {
+    const t = clean(c.text);
+    if (t.trim()) out.push(t);
+  }
+  return out;
+}
+
+/** Mirror of the reference's rawBranchFromCurrent — walk parents to the root. */
+function rawBranchFromCurrent(data: ApiConversation): ApiNode[] {
+  const out: ApiNode[] = [];
+  let id = data.current_node;
+  const seen = new Set<string>();
+  while (id && id !== 'client-created-root' && !seen.has(id)) {
+    seen.add(id);
+    const node = data.mapping?.[id];
+    if (!node) break;
+    out.push(node);
+    id = node.parent ?? undefined;
+  }
+  return out.reverse(); // chronological order
+}
+
+/**
+ * Extract the conversation via the REST API (same call the ChatGPT page makes)
+ * and normalise it into the { role, content, messageId }[] shape the popup and
+ * background already expect.
+ */
+async function extractChatGPTData(): Promise<Record<string, unknown>> {
+  // 1. Conversation id from the URL (same regex as the reference).
+  const match = location.pathname.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  if (!match) {
+    throw new Error('Not a ChatGPT conversation page (no /c/<uuid> in the URL).');
+  }
+  const conversationId = match[0];
+
+  // 2. Auth token from /api/auth/session (relative fetch → chatgpt.com cookies).
+  const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
+  const session = await sessionRes.json().catch(() => null);
+  const accessToken: string | null = session?.accessToken || null;
+  if (!accessToken) {
+    throw new Error('Cannot read ChatGPT session token — are you logged in to ChatGPT?');
+  }
+
+  // 3. Fetch the conversation graph (current_node + mapping).
+  const res = await fetch(`/backend-api/conversation/${conversationId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    credentials: 'include',
+  });
+  if (!res.ok) throw new Error(`Conversation fetch failed (HTTP ${res.status}).`);
+  const data: ApiConversation = await res.json();
+
+  if (!data || typeof data.current_node !== 'string' || !data.mapping) {
+    throw new Error('Unexpected conversation payload shape.');
+  }
+
+  // 4. Walk the branch, keep visible messages, join their text parts.
+  const branch = rawBranchFromCurrent(data);
   const messages: Array<{ role: string; content: string; messageId: string }> = [];
-  const seenText = new Set<string>();
-
-  const push = (role: string, content: string, messageId: string): void => {
-    const normalisedRole = role.toLowerCase();
-    if (normalisedRole !== 'user' && normalisedRole !== 'assistant') return;
-    const text = content.trim();
-    if (!text) return;
-    // Same node can surface through several strategies/wrappers — keep it once.
-    if (seenText.has(text)) return;
-    seenText.add(text);
-    messages.push({
-      role: normalisedRole,
-      content: text,
-      messageId: messageId || `msg-${messages.length}`,
-    });
-  };
-
-  // ChatGPT is a SPA that has shipped several DOM shapes over time, and some
-  // builds nest the conversation in a same-origin <iframe>. Collect every
-  // document we can legally read so the strategies run against all of them.
-  const docs: Document[] = [document];
-  for (const frame of Array.from(document.querySelectorAll('iframe'))) {
-    try {
-      const frameDoc = frame.contentDocument;
-      if (frameDoc?.body) docs.push(frameDoc);
-    } catch {
-      // Cross-origin frame — not readable, skip.
+  let hiddenOrBlank = 0;
+  for (const node of branch) {
+    const msg = node.message;
+    if (!msg || !isApiVisibleMessage(msg)) {
+      hiddenOrBlank++;
+      continue;
     }
-  }
-
-  const textOf = (el: Element | null): string => {
-    if (!el) return '';
-    const contentEl =
-      el.querySelector<HTMLElement>('.markdown, [class*="prose"], [class*="whitespace-pre-wrap"]') ||
-      (el as HTMLElement);
-    return contentEl.innerText || '';
-  };
-
-  // Diagnostics — always collected so a failed export can report what the DOM
-  // actually contained instead of just "no messages".
-  const counts = { roleAttr: 0, turns: 0, markdown: 0, prose: 0, preWrap: 0 };
-  for (const doc of docs) {
-    counts.roleAttr += doc.querySelectorAll('[data-message-author-role]').length;
-    counts.turns += doc.querySelectorAll('[data-testid^="conversation-turn-"]').length;
-    counts.markdown += doc.querySelectorAll('.markdown').length;
-    counts.prose += doc.querySelectorAll('[class*="prose"]').length;
-    counts.preWrap += doc.querySelectorAll('[class*="whitespace-pre-wrap"]').length;
-  }
-
-  let strategy = 'none';
-
-  // Strategy 1: elements that carry data-message-author-role directly — the
-  // role lives on the message element, not on the conversation-turn wrapper.
-  for (const doc of docs) {
-    if (messages.length) break;
-    const roleEls = Array.from(doc.querySelectorAll<HTMLElement>('[data-message-author-role]'));
-    for (const el of roleEls) {
-      push(
-        el.getAttribute('data-message-author-role') || '',
-        textOf(el),
-        el.getAttribute('data-message-id') ||
-          el.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') ||
-          '',
-      );
+    const role = msg.author?.role === 'user' ? 'user' : 'assistant';
+    const content = apiTextParts(msg).join('\n\n');
+    if (!content.trim()) {
+      hiddenOrBlank++;
+      continue;
     }
-    if (messages.length) strategy = 'role-attr';
+    messages.push({ role, content, messageId: msg.id || node.id });
   }
 
-  // Strategy 2: conversation-turn wrappers (role sits on a descendant; if the
-  // attribute is absent entirely, infer it from the content shape — assistant
-  // replies render as formatted markdown, user prompts as plain text).
-  if (!messages.length) {
-    for (const doc of docs) {
-      if (messages.length) break;
-      const turns = Array.from(doc.querySelectorAll<HTMLElement>('[data-testid^="conversation-turn-"]'));
-      for (const turn of turns) {
-        const roleEl = turn.matches('[data-message-author-role]')
-          ? turn
-          : turn.querySelector<HTMLElement>('[data-message-author-role]');
-        const role =
-          roleEl?.getAttribute('data-message-author-role') ||
-          (turn.querySelector('.markdown, [class*="prose"]') ? 'assistant' : 'user');
-        push(role, textOf(turn), turn.getAttribute('data-testid') || '');
-      }
-      if (messages.length) strategy = 'turns';
-    }
-  }
-
-  // Strategy 3: bare content blocks — neither attribute exists in this build.
-  if (!messages.length) {
-    for (const doc of docs) {
-      for (const el of doc.querySelectorAll<HTMLElement>('.markdown, [class*="prose"]')) {
-        push('assistant', el.innerText || '', '');
-      }
-      for (const el of doc.querySelectorAll<HTMLElement>('[class*="whitespace-pre-wrap"]')) {
-        push('user', el.innerText || '', '');
-      }
-    }
-    if (messages.length) strategy = 'content-blocks';
-  }
-
-  const diagnostics = {
-    strategyUsed: strategy,
-    frames: docs.length,
-    iframes: document.querySelectorAll('iframe').length,
-    inIframe: window !== window.top,
-    href: location.href,
-    counts,
-    extracted: messages.length,
-  };
-
-  return Promise.resolve({
+  return {
     platform: 'chatgpt',
+    conversationId: data.conversation_id || null,
+    title: typeof data.title === 'string' ? data.title : '',
     messages,
     pageCount: messages.length,
     extractedAt: new Date().toISOString(),
-    diagnostics,
-  });
+    diagnostics: {
+      source: 'rest-api',
+      conversationId,
+      branchNodes: branch.length,
+      extracted: messages.length,
+      hiddenOrBlank,
+      href: location.href,
+    },
+  };
 }
 
 /* ──────────── auto-mount on first paint ══════════ */
