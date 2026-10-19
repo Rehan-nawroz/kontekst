@@ -4,6 +4,9 @@ export {};
  * Content script for Claude conversations — DOM selection & checkbox UI injection.
  */
 
+import { downloadAttachment } from '../core/attachments';
+import type { ExtractedAttachment } from '../core/types';
+
 // ──────────────── state ───────────────────────────────────────────────
 
 const selectedMessageIds = new Set<string>();
@@ -258,7 +261,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
 
   // Existing extract handler — re-exports as needed.
   if (msg.type === 'kontext:extract') {
-    extractClaudeData().then(data => {
+    extractClaudeData({ includeAttachments: !!msg.includeAttachments }).then(data => {
       respond({ success: true, data });
     }).catch(error => {
       respond({ success: false, error: error.message });
@@ -271,9 +274,61 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
 
 /* ──────────────── extract (placeholder for now) ───────────────── */
 
-async function extractClaudeData(): Promise<Record<string, unknown>> {
+/* ──────── attachment extraction (DOM-scraped uploads) ────────────────────
+ *
+ * Claude renders user uploads inside the transcript row: pasted images are
+ * <img> elements whose src points at /api/uploads/… (or a page-local blob:
+ * URL), and uploaded files are <a> download links to the same area. Both are
+ * collected per row and downloaded with the page's session cookies.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** Collect upload URLs (images + file links) inside one transcript row. */
+function rowAttachmentUrls(row: HTMLElement): Array<{ url: string; filename: string | null }> {
+  const out: Array<{ url: string; filename: string | null }> = [];
+  const seen = new Set<string>();
+  const add = (raw: string | null | undefined, filename: string | null): void => {
+    if (!raw) return;
+    let url: string;
+    try {
+      url = new URL(raw, location.href).href;
+    } catch {
+      return;
+    }
+    // Only chase Claude-hosted uploads and page-local blobs — external
+    // images embedded in the conversation are not user attachments.
+    const isUpload = /\/api\/uploads\//.test(url);
+    const isBlob = url.startsWith('blob:');
+    if (!isUpload && !isBlob) return;
+    if (seen.has(url)) return;
+    seen.add(url);
+    out.push({ url, filename });
+  };
+
+  for (const img of row.querySelectorAll('img')) {
+    // Emoji/react images are tiny and served from static asset hosts, which
+    // the isUpload check already excludes; blob: covers pasted images.
+    add(img.getAttribute('src'), (img.getAttribute('alt') || '').trim() || null);
+  }
+  for (const link of row.querySelectorAll('a[href]')) {
+    const href = link.getAttribute('href') || '';
+    if (!/\/api\/uploads\//.test(href)) continue;
+    const label = (link.textContent || '').trim();
+    add(href, label || null);
+  }
+
+  return out;
+}
+
+async function extractClaudeData(
+  options: { includeAttachments?: boolean } = {},
+): Promise<Record<string, unknown>> {
   const messageRows = rows();
-  const messages: Array<{ role: string; content: string }> = [];
+  const messages: Array<{
+    role: string;
+    content: string;
+    attachments?: ExtractedAttachment[];
+  }> = [];
+  const attachmentErrors: string[] = [];
 
   for (const { row } of messageRows) {
     const article = row.querySelector('[role="article"]');
@@ -283,9 +338,28 @@ async function extractClaudeData(): Promise<Record<string, unknown>> {
 
     // Determine user vs assistant by Claude's role markers.
     const isUser = /human|user/i.test(row.getAttribute('data-testid') || '');
+
+    // Uploads appear on user turns; download them when the popup asked for it.
+    let attachments: ExtractedAttachment[] | undefined;
+    if (options.includeAttachments && isUser) {
+      const targets = rowAttachmentUrls(row);
+      if (targets.length) {
+        attachments = [];
+        for (const target of targets) {
+          const { attachment, error } = await downloadAttachment(target.url, {
+            filename: target.filename,
+          });
+          if (attachment) attachments.push(attachment);
+          else attachmentErrors.push(`${target.filename ?? target.url}: ${error}`);
+        }
+        if (!attachments.length) attachments = undefined;
+      }
+    }
+
     messages.push({
       role: isUser ? 'user' : 'assistant',
       content: article.innerHTML,
+      ...(attachments ? { attachments } : {}),
     });
   }
 
@@ -294,6 +368,7 @@ async function extractClaudeData(): Promise<Record<string, unknown>> {
     conversationId: conversationId(),
     messages,
     extractedAt: new Date().toISOString(),
+    ...(attachmentErrors.length ? { attachmentErrors } : {}),
   };
 }
 
