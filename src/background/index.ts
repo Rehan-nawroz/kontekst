@@ -2,8 +2,21 @@
 import { ZipBuilder } from '../core/ZipBuilder';
 import { MarkdownRenderer } from '../renderers/Markdown';
 import { HtmlRenderer } from '../renderers/Html';
+import { uniqueAttachmentName } from '../core/attachments';
 import { ContentBlockType } from '../core/types';
-import type { ExportOptions, Message } from '../core/types';
+import type { ExtractedAttachment, ExportOptions, Message } from '../core/types';
+
+/** Base64 → bytes, worker-safe (no atob dependency beyond the SW global). */
+function base64ToBytes(b64: string): Uint8Array | null {
+  try {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  } catch {
+    return null; // corrupt payload — skip rather than fail the export.
+  }
+}
 
 // ─────────────────────────── Toolbar icon action ──────────────────────────────
 //
@@ -28,18 +41,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const data = (message.data ?? {}) as Record<string, unknown>;
   const options = (message.options ?? {}) as ExportOptions;
   exportConversation(data, options).then(
-    () => sendResponse({ ok: true }),
+    ({ attachmentCount }) => sendResponse({ ok: true, attachmentCount }),
     (err: unknown) => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }),
   );
   return true; // async response.
 });
 
 // Export the extracted conversation data honouring the popup's chosen options.
+// Returns the number of attachments written into the ZIP (0 when none).
 async function exportConversation(
   data: Record<string, unknown>,
   options: ExportOptions = {},
-): Promise<void> {
-  const messages = (data.messages || []) as Array<{ role: string; content: string }>;
+): Promise<{ attachmentCount: number }> {
+  const messages = (data.messages || []) as Array<{
+    role: string;
+    content: string;
+    attachments?: ExtractedAttachment[];
+  }>;
 
   // Which files to include — the popup defaults both formats to true.
   const formats = options.formats ?? {};
@@ -80,13 +98,36 @@ async function exportConversation(
   }));
 
   // Add only the formats the user ticked (at least one — validated above).
+  // The `taken` set seeds with these names so an attachment called
+  // "conversation.md" can never clobber a rendered file at the ZIP root.
+  const takenNames = new Set<string>();
   if (wantMarkdown) {
     const mdRenderer = new MarkdownRenderer();
     zipBuilder.addFileSync('conversation.md', mdRenderer.render(normalizedMessages, renderOptions));
+    takenNames.add('conversation.md');
   }
   if (wantHtml) {
     const htmlRenderer = new HtmlRenderer();
     zipBuilder.addFileSync('conversation.html', htmlRenderer.render(normalizedMessages, renderOptions));
+    takenNames.add('conversation.html');
+  }
+
+  // "Save attachments": pack every downloaded attachment into the archive.
+  // "Attachments in a separate folder" nests them under attachments/ instead
+  // of the ZIP root. Names are de-duplicated across the whole archive so two
+  // uploads both called "image.png" survive as image.png + image (2).png.
+  let attachmentCount = 0;
+  if (options.saveAttachments) {
+    const prefix = options.attachmentsInFolder ? 'attachments/' : '';
+    for (const msg of messages) {
+      for (const attachment of msg.attachments ?? []) {
+        const bytes = base64ToBytes(attachment.dataBase64);
+        if (!bytes || bytes.length === 0) continue; // corrupt/empty — skip.
+        const unique = uniqueAttachmentName(attachment.filename, takenNames);
+        zipBuilder.addFileSync(prefix + unique, bytes);
+        attachmentCount++;
+      }
+    }
   }
 
   // Generate the ZIP and start the download.
@@ -105,12 +146,23 @@ async function exportConversation(
     saveAs: true,
   });
 
+  // Mention attachments in the notification, including any that failed to
+  // download (content scripts report those in data.attachmentErrors).
+  const skipped = Array.isArray(data.attachmentErrors) ? data.attachmentErrors.length : 0;
+  const attachmentNote = attachmentCount
+    ? `, ${attachmentCount} attachment${attachmentCount === 1 ? '' : 's'}${skipped ? ` (${skipped} failed)` : ''}`
+    : skipped
+      ? ` (${skipped} attachment${skipped === 1 ? '' : 's'} failed to download)`
+      : '';
+
   chrome.notifications.create({
     type: 'basic',
     iconUrl: chrome.runtime.getURL('icons/icon128.png'),
     title: 'Kontext',
-    message: `${messages.length} messages exported successfully!`,
+    message: `${messages.length} messages exported successfully${attachmentNote}!`,
   });
+
+  return { attachmentCount };
 }
 
 /** Encode a Blob as a base64 data: URL without needing a DOM (worker-safe). */
