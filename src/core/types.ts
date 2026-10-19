@@ -171,3 +171,33 @@ export interface GrokUserAssetAttachment {
   mimeType: string;
   isImage: boolean;
 }
+
+// ── Export options (popup → background) ──────────────────────────────────────
+
+/**
+ * User-chosen export settings sent by the popup alongside the extracted
+ * conversation data. Every field is optional — the background applies the
+ * same defaults as the popup when a field is missing.
+ */
+export interface ExportOptions {
+  /** Base name for the downloaded ZIP (sanitised); empty → conversation title → timestamp. */
+  exportName?: string;
+
+  /** Display label printed for user messages (default "User"). */
+  userLabel?: string;
+
+  /** Display label printed for assistant messages (default "Assistant"). */
+  assistantLabel?: string;
+
+  /** Which files to include in the ZIP. Both default to true when omitted. */
+  formats?: {
+    markdown?: boolean;
+    html?: boolean;
+  };
+
+  /** When true, prepend the original conversation link to the rendered files. */
+  includeChatLink?: boolean;
+
+  /** URL of the conversation being exported (source for the chat link). */
+  sourceUrl?: string | null;
+}
