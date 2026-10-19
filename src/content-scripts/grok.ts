@@ -5,6 +5,9 @@ export {};
  */
 
 import { downloadAttachment } from '../core/attachments';
+import { grokTurnAttachments } from '../core/platform-attachments';
+import type { GrokAttachmentDescriptor } from '../core/platform-attachments';
+import type { DownloadResult } from '../core/attachments';
 import type { ExtractedAttachment } from '../core/types';
 
 // ──────────────── state ───────────────────────────────────────────────
@@ -318,41 +321,144 @@ function initGrokSelection(): void {
 
 // ────── data extraction for export ─────────── */
 
-/* ──────── attachment extraction (user-uploaded images) ───────────────────
+/* ──────── attachment extraction (reference: grok-api.js + grok-normalize) ──
  *
- * Grok renders pasted/uploaded images as <img> elements inside the user
- * message container; remote uploads live on grok.com/x.ai hosts and freshly
- * pasted ones on page-local blob: URLs. Both are collected per turn and
- * downloaded with the page's cookies.
+ * Grok attachments are API objects, not DOM images: every response turn
+ * carries `cardAttachmentsJson` (generated/search images, rendered files) and
+ * `fileAttachments` (asset UUIDs — a user upload can exist ONLY as a UUID,
+ * with no card and no rendered <img>). Resolution paths (verified in the
+ * reference docs/provider-internals.md):
+ *
+ *   asset UUID              → GET /rest/assets/<id> → { key, name, mimeType }
+ *                            → https://assets.grok.com/<key> via an
+ *                              authenticated page-context fetch (credentials +
+ *                              grok referrer + image-like Accept; a bare
+ *                              fetch without them returns 403)
+ *   generated image card    → image_chunk.imageUrl on assets.grok.com, same
+ *                              authenticated fetch
+ *   rendered/generated file → GET /rest/conversations/files/content
+ *                              ?conversationId&path → fresh signed URL,
+ *                              fetched WITHOUT credentials (the signature is
+ *                              the auth)
+ *   search/third-party img  → best-effort remote fetch
+ *
+ * DOM blob: <img> URLs on user rows are kept as a last-resort fallback.
  * ────────────────────────────────────────────────────────────────────────── */
 
-/** Collect user-upload image URLs inside one response turn. */
-function turnAttachmentUrls(turn: Element): Array<{ url: string; filename: string | null }> {
-  const out: Array<{ url: string; filename: string | null }> = [];
+const GROK_IMAGE_ACCEPT = 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8';
+
+interface GrokApiTurn {
+  fileAttachments?: unknown;
+  cardAttachmentsJson?: unknown;
+}
+
+/** Fetch the conversation's responses once per export; map responseId → turn. */
+async function fetchGrokApiTurns(conversationId: string): Promise<Map<string, GrokApiTurn>> {
+  const map = new Map<string, GrokApiTurn>();
+  const response = await fetch(
+    `/rest/app-chat/conversations/${encodeURIComponent(conversationId)}/responses?includeThreads=false`,
+    { credentials: 'include' },
+  );
+  if (!response.ok) throw new Error(`Grok responses GET: ${response.status}`);
+  const data = (await response.json()) as { responses?: unknown[] };
+  for (const raw of Array.isArray(data.responses) ? data.responses : []) {
+    const turn = raw as (GrokApiTurn & { responseId?: unknown }) | null;
+    if (!turn || typeof turn !== 'object') continue;
+    const id = turn.responseId != null ? String(turn.responseId) : '';
+    if (id) map.set(id, turn);
+  }
+  return map;
+}
+
+/** Resolve /rest/assets metadata → absolute asset URL + display name. */
+async function resolveGrokAsset(
+  assetId: string,
+): Promise<{ url: string; name: string | null; mimeType: string | null }> {
+  const response = await fetch(`/rest/assets/${encodeURIComponent(assetId)}`, { credentials: 'include' });
+  if (!response.ok) throw new Error(`asset metadata GET: ${response.status}`);
+  const meta = (await response.json()) as Record<string, unknown>;
+  const key = typeof meta.key === 'string' ? meta.key.trim() : '';
+  if (!key) throw new Error('asset key is missing');
+  const url = /^https?:\/\//i.test(key) ? key : `https://assets.grok.com/${key.replace(/^\/+/, '')}`;
+  return {
+    url,
+    name: typeof meta.name === 'string' && meta.name ? meta.name : null,
+    mimeType: typeof meta.mimeType === 'string' && meta.mimeType ? meta.mimeType : null,
+  };
+}
+
+/** Authenticated page-context download of an assets.grok.com URL. */
+function downloadGrokAssetBytes(
+  url: string,
+  name: string | null,
+  mimeType: string | null,
+): Promise<DownloadResult> {
+  const isImage = (mimeType || '').startsWith('image/') ||
+    /\.(?:png|jpe?g|gif|webp|avif|svg)(?:$|[?#])/i.test(url);
+  return downloadAttachment(url, {
+    filename: name,
+    mimeType,
+    referrer: 'https://grok.com/',
+    headers: { Accept: isImage ? GROK_IMAGE_ACCEPT : '*/*' },
+  });
+}
+
+/** Download a rendered/generated file through its fresh signed URL. */
+async function downloadGrokSignedFile(
+  descriptor: Extract<GrokAttachmentDescriptor, { kind: 'signed-file' }>,
+): Promise<DownloadResult> {
+  if (!descriptor.conversationId) return { attachment: null, error: 'missing conversation context' };
+  const params = new URLSearchParams({
+    conversationId: descriptor.conversationId,
+    path: descriptor.filePath,
+  });
+  const metaResponse = await fetch(`/rest/conversations/files/content?${params}`, { credentials: 'include' });
+  if (!metaResponse.ok) return { attachment: null, error: `file metadata GET: ${metaResponse.status}` };
+  const meta = (await metaResponse.json().catch(() => null)) as Record<string, unknown> | null;
+  const signedUrl = typeof meta?.downloadSignedUrl === 'string' ? meta.downloadSignedUrl
+    : typeof meta?.signedUrl === 'string' ? meta.signedUrl
+    : null;
+  if (!signedUrl) return { attachment: null, error: 'signed URL is missing' };
+  const mimeType = typeof meta?.mimeType === 'string' && meta.mimeType ? meta.mimeType : descriptor.mimeType;
+  return downloadAttachment(signedUrl, {
+    filename: descriptor.originalName,
+    mimeType,
+    credentials: 'omit',
+  });
+}
+
+/** Download one Grok descriptor through the right provider path. */
+async function downloadGrokDescriptor(descriptor: GrokAttachmentDescriptor): Promise<DownloadResult> {
+  switch (descriptor.kind) {
+    case 'asset': {
+      try {
+        const { url, name, mimeType } = await resolveGrokAsset(descriptor.assetId);
+        return await downloadGrokAssetBytes(url, name, mimeType);
+      } catch (err) {
+        return { attachment: null, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+    case 'generated-image':
+      return downloadGrokAssetBytes(descriptor.url, null, descriptor.mimeType);
+    case 'search-image':
+      return downloadAttachment(descriptor.url, { credentials: 'omit' });
+    case 'signed-file':
+      return downloadGrokSignedFile(descriptor);
+  }
+}
+
+/** Page-local blob: images on user rows (fresh pastes not in the API yet). */
+function turnBlobImageUrls(turn: Element): string[] {
+  const out: string[] = [];
   const seen = new Set<string>();
-
   const userEl = turn.querySelector('[data-testid="user-message"]');
-  if (!userEl) return out; // assistant turns don't carry user uploads.
-
+  if (!userEl) return out;
   for (const img of userEl.querySelectorAll('img')) {
     const raw = img.getAttribute('src');
-    if (!raw) continue;
-    let url: string;
-    try {
-      url = new URL(raw, location.href).href;
-    } catch {
-      continue;
-    }
-    // Remote uploads are same-site; freshly pasted images are blob: URLs.
-    const isRemote = url.startsWith('https://grok.com/') || url.startsWith('https://x.ai/');
-    const isBlob = url.startsWith('blob:');
-    if (!isRemote && !isBlob) continue;
-    if (seen.has(url)) continue;
-    seen.add(url);
-    const alt = (img.getAttribute('alt') || '').trim() || null;
-    out.push({ url, filename: alt });
+    if (!raw || !raw.startsWith('blob:') || seen.has(raw)) continue;
+    seen.add(raw);
+    out.push(raw);
   }
-
   return out;
 }
 
@@ -366,6 +472,25 @@ async function extractGrokData(
     attachments?: ExtractedAttachment[];
   }> = [];
   const attachmentErrors: string[] = [];
+  const convId = conversationId();
+
+  // Resolve the API turns once per export — cards + fileAttachments UUIDs
+  // only exist in the responses payload, not in the DOM.
+  let apiTurns = new Map<string, GrokApiTurn>();
+  if (options.includeAttachments && convId) {
+    try {
+      apiTurns = await fetchGrokApiTurns(convId);
+      let described = 0;
+      for (const turn of apiTurns.values()) described += grokTurnAttachments(turn, convId).length;
+      console.log('[Kontext] grok attachment diag:', JSON.stringify({
+        conversationId: convId,
+        apiTurns: apiTurns.size,
+        descriptors: described,
+      }));
+    } catch (error) {
+      attachmentErrors.push(`responses API: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
   for (const item of items) {
     // Look for the message text element inside the response turn.
@@ -376,29 +501,46 @@ async function extractGrokData(
     }
 
     const innerHTML = (textEl?.innerHTML as string) || '';
-    if (!innerHTML.trim() && !innerHTML.length) continue;
 
     // Determine user vs assistant from data-testid.
     const roleEl = item.turn.querySelector('[data-testid="user-message"], [data-testid="assistant-message"]');
     const hasRoleAttr = (roleEl?.getAttribute('data-testid') || '');
     const isUser = /user/i.test(hasRoleAttr);
 
-    // Download this turn's user uploads when the popup asked for them.
+    // Attachments: API descriptors for this turn (all roles) plus blob:
+    // fallback images on user rows. Computed BEFORE the empty-text check so a
+    // files-only turn still exports.
     let attachments: ExtractedAttachment[] | undefined;
-    if (options.includeAttachments && isUser) {
-      const targets = turnAttachmentUrls(item.turn);
-      if (targets.length) {
-        attachments = [];
-        for (const target of targets) {
-          const { attachment, error } = await downloadAttachment(target.url, {
-            filename: target.filename,
-          });
-          if (attachment) attachments.push(attachment);
-          else attachmentErrors.push(`${target.filename ?? target.url}: ${error}`);
+    if (options.includeAttachments) {
+      const downloaded: ExtractedAttachment[] = [];
+      const seenKeys = new Set<string>();
+
+      const apiTurn = apiTurns.get(item.id);
+      if (apiTurn) {
+        for (const descriptor of grokTurnAttachments(apiTurn, convId)) {
+          if (seenKeys.has(descriptor.key)) continue;
+          seenKeys.add(descriptor.key);
+          const { attachment, error } = await downloadGrokDescriptor(descriptor);
+          if (attachment) downloaded.push(attachment);
+          else attachmentErrors.push(`${descriptor.key}: ${error}`);
         }
-        if (!attachments.length) attachments = undefined;
       }
+
+      if (isUser) {
+        for (const url of turnBlobImageUrls(item.turn)) {
+          const key = `blob:${url}`;
+          if (seenKeys.has(key)) continue;
+          seenKeys.add(key);
+          const { attachment, error } = await downloadAttachment(url, { filename: null });
+          if (attachment) downloaded.push(attachment);
+          else attachmentErrors.push(`${url}: ${error}`);
+        }
+      }
+
+      if (downloaded.length) attachments = downloaded;
     }
+
+    if (!innerHTML.trim() && !attachments) continue;
 
     messages.push({
       role: isUser ? 'user' : 'assistant',
@@ -409,7 +551,7 @@ async function extractGrokData(
 
   return {
     platform: 'grok',
-    conversationId: conversationId(),
+    conversationId: convId,
     title: document.title || '',
     messages,
     totalCount: totalMessageCount(),
