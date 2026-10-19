@@ -4,6 +4,14 @@
  * Reference: dom-selection.js (stable-id helpers, turn-root matching)
  */
 
+import {
+  blobToBase64,
+  downloadAttachment,
+  finalizeAttachmentName,
+} from '../core/attachments';
+import type { DownloadResult } from '../core/attachments';
+import type { ExtractedAttachment } from '../core/types';
+
 /* ──────────────── stable-id helpers (from reference) ──────────────── */
 
 function isTemporaryId(value: string): boolean {
@@ -230,7 +238,7 @@ export function getSelectedMessages(): Set<string> {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'kontext:extract') {
-    extractChatGPTData().then(data => {
+    extractChatGPTData({ includeAttachments: !!message.includeAttachments }).then(data => {
       sendResponse({ success: true, data });
     }).catch(err => {
       sendResponse({ success: false, error: err.message });
@@ -351,12 +359,117 @@ function rawBranchFromCurrent(data: ApiConversation): ApiNode[] {
   return out.reverse(); // chronological order
 }
 
+/* ──────── attachment extraction (files uploaded into the chat) ─────────────
+ *
+ * Two places in the conversation payload carry attachments:
+ *  1. `message.metadata.attachments` — uploaded documents, as
+ *     { id, name, mimeType, size } records.
+ *  2. `multimodal_text` content parts — pasted/dropped images, as objects
+ *     with `asset_pointer: "file-service://file-<id>"` (apiTextParts skips
+ *     these non-string parts, so they only surface here).
+ * Both resolve to a file id that downloads through
+ * /backend-api/files/<id>/download with the session token. That endpoint
+ * either returns the bytes directly or a JSON envelope carrying a signed
+ * `download_url` — both shapes are handled.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+interface ApiAttachmentMeta {
+  id?: string;
+  name?: string;
+  mimeType?: string;
+}
+
+interface ApiMultimodalPart {
+  content_type?: string;
+  asset_pointer?: string;
+  name?: string;
+  mime_type?: string;
+}
+
+/** Collect every attachment descriptor referenced by one API message. */
+function apiMessageAttachments(
+  msg: ApiMessage,
+): Array<{ fileId: string; filename: string | null; mimeType: string | null }> {
+  const out: Array<{ fileId: string; filename: string | null; mimeType: string | null }> = [];
+  const seenIds = new Set<string>();
+  const push = (fileId: string | null | undefined, filename: string | null, mimeType: string | null): void => {
+    if (!fileId || seenIds.has(fileId)) return;
+    seenIds.add(fileId);
+    out.push({ fileId, filename, mimeType });
+  };
+
+  // 1. Uploaded documents in metadata.attachments.
+  const meta = msg.metadata?.attachments;
+  if (Array.isArray(meta)) {
+    for (const raw of meta as ApiAttachmentMeta[]) {
+      push(raw?.id, raw?.name ?? null, raw?.mimeType ?? null);
+    }
+  }
+
+  // 2. Pasted images in multimodal_text parts.
+  const content = msg.content;
+  if (content?.content_type === 'multimodal_text' && Array.isArray(content.parts)) {
+    for (const raw of content.parts) {
+      if (!raw || typeof raw !== 'object') continue;
+      const part = raw as ApiMultimodalPart;
+      if (typeof part.asset_pointer !== 'string') continue;
+      const match = part.asset_pointer.match(/^file-service:\/\/(.+)$/);
+      if (match) push(match[1].split('?')[0], part.name ?? null, part.mime_type ?? null);
+    }
+  }
+
+  return out;
+}
+
+/** Download one ChatGPT file, handling both direct-bytes and JSON-envelope responses. */
+async function downloadChatGptFile(
+  fileId: string,
+  filename: string | null,
+  mimeType: string | null,
+  accessToken: string,
+): Promise<DownloadResult> {
+  let response: Response;
+  try {
+    response = await fetch(`/backend-api/files/${encodeURIComponent(fileId)}/download`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      credentials: 'include',
+    });
+  } catch (err) {
+    return { attachment: null, error: `network error: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!response.ok) return { attachment: null, error: `HTTP ${response.status}` };
+
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    // Envelope shape: { status, download_url } pointing at a signed CDN URL.
+    const payload = (await response.json().catch(() => null)) as { download_url?: string } | null;
+    const downloadUrl = typeof payload?.download_url === 'string' ? payload.download_url : null;
+    if (!downloadUrl) return { attachment: null, error: 'no download_url in files API response' };
+    return downloadAttachment(downloadUrl, { filename, mimeType });
+  }
+
+  // Direct bytes — repack the already-received body.
+  const blob = await response.blob().catch(() => null);
+  if (!blob) return { attachment: null, error: 'body read failed' };
+  const finalMime = mimeType || blob.type || contentType || null;
+  return {
+    attachment: {
+      filename: finalizeAttachmentName(filename, finalMime),
+      mimeType: finalMime,
+      dataBase64: await blobToBase64(blob),
+    },
+  };
+}
+
 /**
  * Extract the conversation via the REST API (same call the ChatGPT page makes)
  * and normalise it into the { role, content, messageId }[] shape the popup and
- * background already expect.
+ * background already expect. When includeAttachments is set, uploaded files
+ * and pasted images are downloaded and carried alongside as base64.
  */
-async function extractChatGPTData(): Promise<Record<string, unknown>> {
+async function extractChatGPTData(
+  options: { includeAttachments?: boolean } = {},
+): Promise<Record<string, unknown>> {
   // 1. Conversation id from the URL (same regex as the reference).
   const match = location.pathname.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
   if (!match) {
@@ -386,7 +499,13 @@ async function extractChatGPTData(): Promise<Record<string, unknown>> {
 
   // 4. Walk the branch, keep visible messages, join their text parts.
   const branch = rawBranchFromCurrent(data);
-  const messages: Array<{ role: string; content: string; messageId: string }> = [];
+  const messages: Array<{
+    role: string;
+    content: string;
+    messageId: string;
+    attachments?: ExtractedAttachment[];
+  }> = [];
+  const attachmentErrors: string[] = [];
   let hiddenOrBlank = 0;
   for (const node of branch) {
     const msg = node.message;
@@ -400,7 +519,28 @@ async function extractChatGPTData(): Promise<Record<string, unknown>> {
       hiddenOrBlank++;
       continue;
     }
-    messages.push({ role, content, messageId: msg.id || node.id });
+
+    // Download this message's attachments (files + pasted images) when asked.
+    let attachments: ExtractedAttachment[] | undefined;
+    if (options.includeAttachments) {
+      const descriptors = apiMessageAttachments(msg);
+      if (descriptors.length) {
+        attachments = [];
+        for (const descriptor of descriptors) {
+          const { attachment, error } = await downloadChatGptFile(
+            descriptor.fileId,
+            descriptor.filename,
+            descriptor.mimeType,
+            accessToken,
+          );
+          if (attachment) attachments.push(attachment);
+          else attachmentErrors.push(`${descriptor.filename ?? descriptor.fileId}: ${error}`);
+        }
+        if (!attachments.length) attachments = undefined;
+      }
+    }
+
+    messages.push({ role, content, messageId: msg.id || node.id, ...(attachments ? { attachments } : {}) });
   }
 
   return {
@@ -410,6 +550,7 @@ async function extractChatGPTData(): Promise<Record<string, unknown>> {
     messages,
     pageCount: messages.length,
     extractedAt: new Date().toISOString(),
+    ...(attachmentErrors.length ? { attachmentErrors } : {}),
     diagnostics: {
       source: 'rest-api',
       conversationId,
