@@ -3,7 +3,7 @@ import { ZipBuilder } from '../core/ZipBuilder';
 import { MarkdownRenderer } from '../renderers/Markdown';
 import { HtmlRenderer } from '../renderers/Html';
 import { ContentBlockType } from '../core/types';
-import type { Message } from '../core/types';
+import type { ExportOptions, Message } from '../core/types';
 
 // ─────────────────────────── Toolbar icon action ──────────────────────────────
 //
@@ -26,16 +26,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // The popup already waited for kontext:extract and has the data; re-forward
   // whatever the popup passes so exportConversation stays reusable.
   const data = (message.data ?? {}) as Record<string, unknown>;
-  exportConversation(data).then(
+  const options = (message.options ?? {}) as ExportOptions;
+  exportConversation(data, options).then(
     () => sendResponse({ ok: true }),
     (err: unknown) => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }),
   );
   return true; // async response.
 });
 
-// Export the extracted conversation data in chosen format
-async function exportConversation(data: Record<string, unknown>): Promise<void> {
+// Export the extracted conversation data honouring the popup's chosen options.
+async function exportConversation(
+  data: Record<string, unknown>,
+  options: ExportOptions = {},
+): Promise<void> {
   const messages = (data.messages || []) as Array<{ role: string; content: string }>;
+
+  // Which files to include — the popup defaults both formats to true.
+  const formats = options.formats ?? {};
+  const wantMarkdown = formats.markdown !== false;
+  const wantHtml = formats.html !== false;
+  if (!wantMarkdown && !wantHtml) {
+    throw new Error('Select at least one format.');
+  }
+
+  // Role labels + the optional original-chat link ("Include original chat link").
+  const renderOptions = {
+    userLabel: options.userLabel,
+    assistantLabel: options.assistantLabel,
+    sourceUrl: options.includeChatLink ? options.sourceUrl ?? null : null,
+  };
 
   if (messages.length === 0) {
     // Throw so the popup surfaces a real error instead of a false "Exported!".
@@ -48,7 +67,6 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
 
   const zipBuilder = new ZipBuilder();
 
-  // Add Markdown version
   // Normalise the extraction output into the shared conversation schema.
   const normalizedMessages: Message[] = messages.map((m, index) => ({
     id: `message-${index}`,
@@ -61,14 +79,15 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
     attachments: [],
   }));
 
-  const mdRenderer = new MarkdownRenderer();
-  const markdownContent = mdRenderer.render(normalizedMessages);
-  zipBuilder.addFileSync('conversation.md', markdownContent);
-
-  // Add HTML version
-  const htmlRenderer = new HtmlRenderer();
-  const htmlContent = htmlRenderer.render(normalizedMessages);
-  zipBuilder.addFileSync('conversation.html', htmlContent);
+  // Add only the formats the user ticked (at least one — validated above).
+  if (wantMarkdown) {
+    const mdRenderer = new MarkdownRenderer();
+    zipBuilder.addFileSync('conversation.md', mdRenderer.render(normalizedMessages, renderOptions));
+  }
+  if (wantHtml) {
+    const htmlRenderer = new HtmlRenderer();
+    zipBuilder.addFileSync('conversation.html', htmlRenderer.render(normalizedMessages, renderOptions));
+  }
 
   // Generate the ZIP and start the download.
   //
@@ -82,7 +101,7 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
 
   chrome.downloads.download({
     url: dataUrl,
-    filename: `kontext-export-${Date.now()}.zip`,
+    filename: `${resolveZipName(data, options)}.zip`,
     saveAs: true,
   });
 
@@ -103,6 +122,27 @@ async function blobToDataUrl(blob: Blob): Promise<string> {
     binary += String.fromCharCode(...Array.from(bytes.subarray(i, i + CHUNK)));
   }
   return `data:application/zip;base64,${btoa(binary)}`;
+}
+
+/** Strip characters invalid in file names, plus any trailing .zip / dots / spaces. */
+function sanitizeZipName(raw: string): string {
+  return raw
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')
+    .replace(/(\.zip)+$/i, '')
+    .replace(/[. ]+$/g, '')
+    .trim();
+}
+
+/**
+ * ZIP base name: the popup's export name → the conversation title → a
+ * timestamped default. The caller appends ".zip".
+ */
+function resolveZipName(data: Record<string, unknown>, options: ExportOptions): string {
+  const fromOption = sanitizeZipName(options.exportName ?? '');
+  if (fromOption) return fromOption;
+  const title = typeof data.title === 'string' ? sanitizeZipName(data.title) : '';
+  if (title) return title;
+  return `kontext-export-${Date.now()}`;
 }
 
 console.log('Kontext background service worker loaded');
