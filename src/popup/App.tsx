@@ -49,6 +49,8 @@ export function App() {
   const [formatMarkdown, setFormatMarkdown] = useState(true);
   const [formatHtml, setFormatHtml] = useState(true);
   const [includeChatLink, setIncludeChatLink] = useState(false);
+  const [saveAttachments, setSaveAttachments] = useState(false);
+  const [attachmentsInFolder, setAttachmentsInFolder] = useState(false);
   const [status, setStatus] = useState('Ready');
   const [statusKind, setStatusKind] = useState<StatusKind>('idle');
   const [isExporting, setIsExporting] = useState(false);
@@ -84,8 +86,10 @@ export function App() {
 
       // Manifest-declared content scripts are already injected on supported
       // hosts; the extractor answers with { success, data } (or { error }).
+      // includeAttachments tells it to also download the chat's files/images.
       const result = (await chrome.tabs.sendMessage(tab.id, {
         type: 'kontext:extract',
+        includeAttachments: saveAttachments,
       })) as MessageData;
 
       if (!result?.success) throw new Error(result?.error || 'Extraction failed.');
@@ -99,6 +103,8 @@ export function App() {
         assistantLabel: assistantLabel.trim() || 'Assistant',
         formats: { markdown: formatMarkdown, html: formatHtml },
         includeChatLink,
+        saveAttachments,
+        attachmentsInFolder: saveAttachments && attachmentsInFolder,
         sourceUrl: includeChatLink ? tab.url ?? null : null,
       };
 
@@ -108,11 +114,12 @@ export function App() {
         type: 'kontext:trigger-export',
         data: result.data,
         options,
-      })) as { ok?: boolean; error?: string } | undefined;
+      })) as { ok?: boolean; error?: string; attachmentCount?: number } | undefined;
 
       if (!exportReply?.ok) throw new Error(exportReply?.error ?? 'Export failed.');
 
-      setStatus('Exported!');
+      const saved = exportReply.attachmentCount ?? 0;
+      setStatus(saved > 0 ? `Exported! (${saved} attachment${saved === 1 ? '' : 's'})` : 'Exported!');
       setStatusKind('success');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'An error occurred.';
@@ -126,7 +133,7 @@ export function App() {
     } finally {
       setIsExporting(false);
     }
-  }, [formatMarkdown, formatHtml, includeChatLink, exportName, userLabel, assistantLabel]);
+  }, [formatMarkdown, formatHtml, includeChatLink, saveAttachments, attachmentsInFolder, exportName, userLabel, assistantLabel]);
 
   const supported = platform !== null;
   const footerText = statusKind === 'idle' ? HINT : status;
@@ -207,12 +214,26 @@ export function App() {
               />
               <span>Include original chat link</span>
             </label>
-            <label class="check check-full check-disabled" title="Coming soon">
-              <input type="checkbox" checked={false} disabled={true} />
+            <label class="check check-full">
+              <input
+                type="checkbox"
+                checked={saveAttachments}
+                onChange={(e) => {
+                  const checked = e.currentTarget.checked;
+                  setSaveAttachments(checked);
+                  if (!checked) setAttachmentsInFolder(false);
+                }}
+                disabled={isExporting}
+              />
               <span>Save attachments</span>
             </label>
-            <label class="check check-full check-disabled" title="Coming soon">
-              <input type="checkbox" checked={false} disabled={true} />
+            <label class={`check check-full${saveAttachments ? '' : ' check-disabled'}`}>
+              <input
+                type="checkbox"
+                checked={attachmentsInFolder}
+                onChange={(e) => setAttachmentsInFolder(e.currentTarget.checked)}
+                disabled={isExporting || !saveAttachments}
+              />
               <span>Attachments in a separate folder</span>
             </label>
           </div>
