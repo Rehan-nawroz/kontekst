@@ -70,18 +70,21 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
   const htmlContent = htmlRenderer.render(normalizedMessages);
   zipBuilder.addFileSync('conversation.html', htmlContent);
 
-  // Generate and download the ZIP file
+  // Generate the ZIP and start the download.
+  //
+  // MV3 service workers have NO DOM, so URL.createObjectURL is undefined here
+  // (calling it throws "URL.createObjectURL is not a function"). Instead encode
+  // the archive as a base64 data: URL — blob.arrayBuffer() and btoa are both
+  // worker-safe, and chrome.downloads.download accepts data: URLs. This also
+  // avoids any object-URL lifetime race with the popup closing.
   const blob = await zipBuilder.generate();
-  const url = URL.createObjectURL(blob);
+  const dataUrl = await blobToDataUrl(blob);
 
   chrome.downloads.download({
-    url,
+    url: dataUrl,
     filename: `kontext-export-${Date.now()}.zip`,
     saveAs: true,
   });
-
-  // Cleanup after download starts
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
 
   chrome.notifications.create({
     type: 'basic',
@@ -89,6 +92,17 @@ async function exportConversation(data: Record<string, unknown>): Promise<void> 
     title: 'Kontext',
     message: `${messages.length} messages exported successfully!`,
   });
+}
+
+/** Encode a Blob as a base64 data: URL without needing a DOM (worker-safe). */
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  const CHUNK = 0x8000; // 32 KiB — keeps fromCharCode under the stack limit.
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...Array.from(bytes.subarray(i, i + CHUNK)));
+  }
+  return `data:application/zip;base64,${btoa(binary)}`;
 }
 
 console.log('Kontext background service worker loaded');
