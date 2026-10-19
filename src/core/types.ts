@@ -172,6 +172,25 @@ export interface GrokUserAssetAttachment {
   isImage: boolean;
 }
 
+// ── Extracted attachments (content script → popup → background) ─────────────
+
+/**
+ * One downloaded chat attachment travelling from the content script to the
+ * service worker. The bytes are carried as base64 because
+ * chrome.runtime messaging JSON-serialises its payload — typed arrays would
+ * not survive the trip.
+ */
+export interface ExtractedAttachment {
+  /** Filename to use inside the ZIP (sanitised; the background still dedupes). */
+  filename: string;
+
+  /** MIME type when known (used to fill in a missing file extension). */
+  mimeType?: string | null;
+
+  /** Base64-encoded file bytes (no `data:` prefix). */
+  dataBase64: string;
+}
+
 // ── Export options (popup → background) ──────────────────────────────────────
 
 /**
@@ -197,6 +216,16 @@ export interface ExportOptions {
 
   /** When true, prepend the original conversation link to the rendered files. */
   includeChatLink?: boolean;
+
+  /** When true, include the downloaded chat attachments as files in the ZIP. */
+  saveAttachments?: boolean;
+
+  /**
+   * When true (and saveAttachments), place attachments under an
+   * "attachments/" folder instead of the ZIP root. Ignored when
+   * saveAttachments is false.
+   */
+  attachmentsInFolder?: boolean;
 
   /** URL of the conversation being exported (source for the chat link). */
   sourceUrl?: string | null;
