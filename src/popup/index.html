@@ -8,80 +8,179 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
-      width: 320px;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #1a1a2e;
-      color: #eee;
+      width: 440px;
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+      background: #05070b;
+      color: #e5e7eb;
     }
 
-    .header {
-      padding: 16px;
-      background: #16213e;
-      border-bottom: 1px solid #0f3460;
+    /* ── Card ─────────────────────────────────────────────── */
+
+    .kontext-app {
+      margin: 12px;
+      padding: 24px 22px 20px;
+      background: linear-gradient(180deg, #0a0e15 0%, #070a10 100%);
+      border: 1px solid rgba(56, 189, 248, 0.30);
+      border-radius: 16px;
+      box-shadow:
+        0 0 30px rgba(56, 189, 248, 0.10),
+        0 18px 48px rgba(0, 0, 0, 0.55);
+    }
+
+    .app-header { margin-bottom: 20px; }
+
+    .wordmark {
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: 1.5px;
+      line-height: 1.1;
+    }
+
+    .wordmark-white { color: #f8fafc; }
+
+    .wordmark-accent {
+      background: linear-gradient(90deg, #38bdf8 0%, #2563eb 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    /* ── Inputs ───────────────────────────────────────────── */
+
+    .text-input {
+      width: 100%;
+      background: #0d1219;
+      border: 1px solid #1d2a3a;
+      border-radius: 8px;
+      padding: 11px 12px;
+      font-size: 14px;
+      font-family: inherit;
+      color: #e5e7eb;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .text-input::placeholder { color: #5b6675; }
+    .text-input:focus { border-color: #38bdf8; }
+    .text-input:disabled { opacity: 0.5; }
+
+    .field-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .field-group label,
+    .section-label {
+      display: block;
+      font-size: 12px;
+      color: #8b98a8;
+      margin-bottom: 6px;
+    }
+
+    .formats { margin-top: 18px; }
+
+    /* ── Checkboxes ───────────────────────────────────────── */
+
+    .checkbox-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px 10px;
+    }
+
+    .check {
       display: flex;
       align-items: center;
-      justify-content: center;
-    }
-
-    .header h1 {
-      font-size: 18px;
-      font-weight: 600;
-      color: #e94560;
-    }
-
-    .content {
-      padding: 16px;
-    }
-
-    .platform-selector {
-      margin-bottom: 12px;
-    }
-
-    .platform-selector label {
-      display: block;
-      font-size: 13px;
-      color: #aaa;
-      margin-bottom: 4px;
-    }
-
-    .platform-selector select {
-      width: 100%;
-      padding: 8px;
-      border-radius: 6px;
-      border: 1px solid #0f3460;
-      background: #16213e;
-      color: #eee;
+      gap: 9px;
       font-size: 14px;
-    }
-
-    .export-btn {
-      width: 100%;
-      padding: 12px;
-      border: none;
-      border-radius: 8px;
-      background: #e94560;
-      color: white;
-      font-size: 15px;
-      font-weight: 600;
+      color: #e5e7eb;
       cursor: pointer;
-      transition: background 0.2s;
+      user-select: none;
     }
 
-    .export-btn:hover {
-      background: #c73e54;
+    .check-full { grid-column: 1 / -1; }
+    .check-disabled { color: #6b7280; cursor: not-allowed; }
+
+    .check input[type="checkbox"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 17px;
+      height: 17px;
+      flex: 0 0 17px;
+      border-radius: 4px;
+      background: #f9fafb;
+      border: 1px solid #cbd5e1;
+      cursor: pointer;
+      position: relative;
+      transition: background 0.12s, border-color 0.12s;
     }
 
-    .export-btn:disabled {
-      background: #555;
+    .check input[type="checkbox"]:checked {
+      background: #38bdf8;
+      border-color: #38bdf8;
+    }
+
+    .check input[type="checkbox"]:checked::after {
+      content: '';
+      position: absolute;
+      left: 5px;
+      top: 1px;
+      width: 4px;
+      height: 9px;
+      border: solid #05070b;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+    }
+
+    .check input[type="checkbox"]:disabled {
+      opacity: 0.35;
       cursor: not-allowed;
     }
 
-    .status {
-      margin-top: 12px;
-      font-size: 12px;
-      color: #888;
-      text-align: center;
+    .check input[type="checkbox"]:disabled:checked {
+      background: #f9fafb;
+      border-color: #cbd5e1;
     }
+
+    /* ── Export button ────────────────────────────────────── */
+
+    .export-btn {
+      width: 100%;
+      margin-top: 22px;
+      padding: 13px;
+      border: none;
+      border-radius: 10px;
+      background: #45c2f4;
+      color: #05070b;
+      font-size: 15px;
+      font-weight: 700;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.05s;
+    }
+
+    .export-btn:hover:not(:disabled) { background: #67d1fa; }
+    .export-btn:active:not(:disabled) { transform: translateY(1px); }
+
+    .export-btn:disabled {
+      background: #1c2531;
+      color: #5b6675;
+      cursor: not-allowed;
+    }
+
+    /* ── Footer hint / status ─────────────────────────────── */
+
+    .footer-hint {
+      margin-top: 16px;
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: #6b7684;
+    }
+
+    .footer-busy { color: #8b98a8; }
+    .footer-error { color: #f87171; }
+    .footer-success { color: #4ade80; }
   </style>
 </head>
 <body>
