@@ -6,9 +6,13 @@
 
 import {
   blobToBase64,
-  downloadAttachment,
   finalizeAttachmentName,
 } from '../core/attachments';
+import {
+  chatGptAttachmentDescriptors,
+  chatGptSandboxDescriptors,
+} from '../core/platform-attachments';
+import type { ChatGptFileDescriptor, ChatGptSandboxDescriptor } from '../core/platform-attachments';
 import type { DownloadResult } from '../core/attachments';
 import type { ExtractedAttachment } from '../core/types';
 
@@ -295,6 +299,8 @@ interface ApiConversation {
   mapping?: Record<string, ApiNode>;
   conversation_id?: string;
   title?: string;
+  /** Conversation-level signed Estuary URLs (authoritative per file id). */
+  safe_urls?: string[];
 }
 
 /** Internal content types the reference hides from the export (conversation.js). */
@@ -361,76 +367,122 @@ function rawBranchFromCurrent(data: ApiConversation): ApiNode[] {
 
 /* ──────── attachment extraction (files uploaded into the chat) ─────────────
  *
- * Two places in the conversation payload carry attachments:
- *  1. `message.metadata.attachments` — uploaded documents, as
- *     { id, name, mimeType, size } records.
- *  2. `multimodal_text` content parts — pasted/dropped images, as objects
- *     with `asset_pointer: "file-service://file-<id>"` (apiTextParts skips
- *     these non-string parts, so they only surface here).
- * Both resolve to a file id that downloads through
- * /backend-api/files/<id>/download with the session token. That endpoint
- * either returns the bytes directly or a JSON envelope carrying a signed
- * `download_url` — both shapes are handled.
+ * Ported from the reference (attachments.js + chatgpt-api.js
+ * downloadAttachmentInPage). Attachments are discovered structurally —
+ * `message.metadata.attachments`, file records nested in `message.content`
+ * (pasted images live in `multimodal_text` parts as `image_asset_pointer`
+ * objects whose `asset_pointer` is `sediment://file_…`), and conversation
+ * level `safe_urls` — then normalised to Estuary file ids by
+ * chatGptAttachmentDescriptors().
+ *
+ * Downloads go through
+ *
+ *   GET /backend-api/files/download/<fileId>
+ *
+ * with the session Bearer token. That endpoint returns a JSON envelope
+ * carrying a signed `download_url`; the media URL is then fetched with the
+ * same token. Sandbox artifacts (only present as Markdown links) resolve via
+ * /backend-api/conversation/<id>/interpreter/download instead.
  * ────────────────────────────────────────────────────────────────────────── */
 
-interface ApiAttachmentMeta {
-  id?: string;
-  name?: string;
-  mimeType?: string;
-}
-
-interface ApiMultimodalPart {
-  content_type?: string;
-  asset_pointer?: string;
-  name?: string;
+/** Metadata envelope returned by the files/interpreter download endpoints. */
+interface ChatGptMediaMeta {
+  status?: string;
+  file_name?: string;
   mime_type?: string;
+  mimeType?: string;
+  content_type?: string;
+  download_url?: string;
+  downloadUrl?: string;
+  url?: string;
+  signed_url?: string;
+  signedUrl?: string;
+  [key: string]: unknown;
 }
 
-/** Collect every attachment descriptor referenced by one API message. */
-function apiMessageAttachments(
-  msg: ApiMessage,
-): Array<{ fileId: string; filename: string | null; mimeType: string | null }> {
-  const out: Array<{ fileId: string; filename: string | null; mimeType: string | null }> = [];
-  const seenIds = new Set<string>();
-  const push = (fileId: string | null | undefined, filename: string | null, mimeType: string | null): void => {
-    if (!fileId || seenIds.has(fileId)) return;
-    seenIds.add(fileId);
-    out.push({ fileId, filename, mimeType });
+/** Resolve any ChatGPT metadata envelope to its signed media URL. */
+function mediaUrlFromMeta(meta: ChatGptMediaMeta | null | undefined): string | null {
+  if (!meta) return null;
+  const url = meta.download_url || meta.downloadUrl || meta.url || meta.signed_url || meta.signedUrl;
+  return typeof url === 'string' && url ? url : null;
+}
+
+/** Best human-readable name inside a metadata object (preferred keys first). */
+function filenameFromMetaObject(value: unknown): string | null {
+  const seen = new WeakSet<object>();
+  const preferred = ['title', 'original_name', 'originalName', 'filename', 'file_name'];
+  const clean = (v: unknown): string | null => {
+    if (typeof v !== 'string') return null;
+    const t = v.trim();
+    // Internal ids are not names (reference cleanName behaviour).
+    return t && !t.startsWith('file_') ? t : null;
   };
 
-  // 1. Uploaded documents in metadata.attachments.
-  const meta = msg.metadata?.attachments;
-  if (Array.isArray(meta)) {
-    for (const raw of meta as ApiAttachmentMeta[]) {
-      push(raw?.id, raw?.name ?? null, raw?.mimeType ?? null);
+  const visit = (obj: unknown): string | null => {
+    if (!obj || typeof obj !== 'object' || seen.has(obj as object)) return null;
+    seen.add(obj as object);
+    const rec = obj as Record<string, unknown>;
+    for (const key of preferred) {
+      const found = clean(rec[key]);
+      if (found) return found;
     }
-  }
-
-  // 2. Pasted images in multimodal_text parts.
-  const content = msg.content;
-  if (content?.content_type === 'multimodal_text' && Array.isArray(content.parts)) {
-    for (const raw of content.parts) {
-      if (!raw || typeof raw !== 'object') continue;
-      const part = raw as ApiMultimodalPart;
-      if (typeof part.asset_pointer !== 'string') continue;
-      const match = part.asset_pointer.match(/^file-service:\/\/(.+)$/);
-      if (match) push(match[1].split('?')[0], part.name ?? null, part.mime_type ?? null);
+    const generic = clean(rec.name);
+    if (generic) return generic;
+    for (const child of Object.values(rec)) {
+      if (child && typeof child === 'object') {
+        const found = visit(child);
+        if (found) return found;
+      }
     }
-  }
+    return null;
+  };
 
-  return out;
+  return visit(value);
 }
 
-/** Download one ChatGPT file, handling both direct-bytes and JSON-envelope responses. */
-async function downloadChatGptFile(
-  fileId: string,
-  filename: string | null,
-  mimeType: string | null,
+/** Parse Content-Disposition: filename*=UTF-8''… / filename="…". */
+function filenameFromContentDisposition(value: string | null): string | null {
+  if (!value) return null;
+  const clean = (v: string): string | null => {
+    const t = v.trim().replace(/^"|"$/g, '');
+    return t && !t.startsWith('file_') ? t : null;
+  };
+
+  const star = value.match(/filename\*\s*=\s*(?:UTF-8''|utf-8'')?([^;]+)/i);
+  if (star) {
+    let v = star[1].trim().replace(/^"|"$/g, '');
+    try { v = decodeURIComponent(v); } catch { /* keep raw */ }
+    const cleaned = clean(v);
+    if (cleaned) return cleaned;
+  }
+
+  const plain = value.match(/filename\s*=\s*(?:"([^"]+)"|([^;]+))/i);
+  if (plain) {
+    const cleaned = clean((plain[1] || plain[2] || '').trim());
+    if (cleaned) return cleaned;
+  }
+  return null;
+}
+
+function basenameFromUrl(value: string): string | null {
+  try {
+    const segments = new URL(value, location.href).pathname.split('/').filter(Boolean);
+    return segments.length ? decodeURIComponent(segments[segments.length - 1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Fetch a resolved media URL with the session token and repack its bytes. */
+async function fetchChatGptMedia(
+  mediaUrl: string,
   accessToken: string,
+  fallbackName: string | null,
+  fallbackType: string | null,
 ): Promise<DownloadResult> {
   let response: Response;
   try {
-    response = await fetch(`/backend-api/files/${encodeURIComponent(fileId)}/download`, {
+    response = await fetch(mediaUrl, {
       headers: { Authorization: `Bearer ${accessToken}` },
       credentials: 'include',
     });
@@ -439,26 +491,109 @@ async function downloadChatGptFile(
   }
   if (!response.ok) return { attachment: null, error: `HTTP ${response.status}` };
 
-  const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    // Envelope shape: { status, download_url } pointing at a signed CDN URL.
-    const payload = (await response.json().catch(() => null)) as { download_url?: string } | null;
-    const downloadUrl = typeof payload?.download_url === 'string' ? payload.download_url : null;
-    if (!downloadUrl) return { attachment: null, error: 'no download_url in files API response' };
-    return downloadAttachment(downloadUrl, { filename, mimeType });
-  }
-
-  // Direct bytes — repack the already-received body.
+  const name = fallbackName ||
+    filenameFromContentDisposition(response.headers.get('content-disposition')) ||
+    basenameFromUrl(response.url || mediaUrl);
   const blob = await response.blob().catch(() => null);
   if (!blob) return { attachment: null, error: 'body read failed' };
-  const finalMime = mimeType || blob.type || contentType || null;
+
+  const contentType = response.headers.get('content-type') || '';
+  const mimeType = fallbackType && fallbackType !== 'application/octet-stream'
+    ? fallbackType
+    : blob.type || contentType || null;
   return {
     attachment: {
-      filename: finalizeAttachmentName(filename, finalMime),
-      mimeType: finalMime,
+      filename: finalizeAttachmentName(name, mimeType),
+      mimeType,
       dataBase64: await blobToBase64(blob),
     },
   };
+}
+
+/** Download one ordinary ChatGPT file (uploaded doc or pasted/generated image). */
+async function downloadChatGptFile(
+  descriptor: ChatGptFileDescriptor,
+  accessToken: string,
+): Promise<DownloadResult> {
+  let name = descriptor.originalName;
+  let type = descriptor.mimeType;
+  let mediaUrl = descriptor.signedUrl;
+
+  if (!mediaUrl) {
+    if (!descriptor.fileId) return { attachment: null, error: 'attachment id is missing' };
+
+    let response: Response;
+    try {
+      // NB: the reference endpoint is files/download/<id> — NOT files/<id>/download.
+      response = await fetch(`/backend-api/files/download/${encodeURIComponent(descriptor.fileId)}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        credentials: 'include',
+      });
+    } catch (err) {
+      return { attachment: null, error: `network error: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (!response.ok) return { attachment: null, error: `HTTP ${response.status}` };
+
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      // Envelope shape: { download_url, mime_type, … } → signed media URL.
+      const meta = (await response.json().catch(() => null)) as ChatGptMediaMeta | null;
+      mediaUrl = mediaUrlFromMeta(meta);
+      name = name || filenameFromMetaObject(meta);
+      type = type || meta?.mime_type || meta?.mimeType || meta?.content_type || null;
+      if (!mediaUrl) return { attachment: null, error: 'no download_url in files API response' };
+    } else {
+      // Direct bytes — repack the body we already have.
+      const blob = await response.blob().catch(() => null);
+      if (!blob) return { attachment: null, error: 'body read failed' };
+      const mimeType = type || blob.type || contentType || null;
+      return {
+        attachment: {
+          filename: finalizeAttachmentName(name, mimeType),
+          mimeType,
+          dataBase64: await blobToBase64(blob),
+        },
+      };
+    }
+  }
+
+  return fetchChatGptMedia(mediaUrl, accessToken, name, type);
+}
+
+/** Resolve a sandbox artifact via interpreter/download, then fetch its bytes. */
+async function downloadChatGptSandboxFile(
+  descriptor: ChatGptSandboxDescriptor,
+  conversationId: string,
+  messageId: string,
+  accessToken: string,
+): Promise<DownloadResult> {
+  const query = new URLSearchParams({
+    message_id: messageId,
+    sandbox_path: descriptor.sandboxPath,
+    download_intent: 'true',
+  });
+
+  let response: Response;
+  try {
+    response = await fetch(
+      `/backend-api/conversation/${encodeURIComponent(conversationId)}/interpreter/download?${query}`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, credentials: 'include' },
+    );
+  } catch (err) {
+    return { attachment: null, error: `network error: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!response.ok) return { attachment: null, error: `interpreter/download HTTP ${response.status}` };
+
+  const meta = (await response.json().catch(() => null)) as ChatGptMediaMeta | null;
+  if (meta?.status && meta.status !== 'success') {
+    return { attachment: null, error: `interpreter/download status: ${String(meta.status)}` };
+  }
+  const mediaUrl = mediaUrlFromMeta(meta);
+  if (!mediaUrl) return { attachment: null, error: 'no download_url in interpreter response' };
+
+  const name = descriptor.originalName || filenameFromMetaObject(meta);
+  const type = meta?.mime_type || meta?.mimeType || null;
+  return fetchChatGptMedia(mediaUrl, accessToken, name, type);
 }
 
 /**
@@ -499,6 +634,9 @@ async function extractChatGPTData(
 
   // 4. Walk the branch, keep visible messages, join their text parts.
   const branch = rawBranchFromCurrent(data);
+  const safeUrls = Array.isArray(data.safe_urls)
+    ? data.safe_urls.filter((url): url is string => typeof url === 'string')
+    : [];
   const messages: Array<{
     role: string;
     content: string;
@@ -514,30 +652,46 @@ async function extractChatGPTData(
       continue;
     }
     const role = msg.author?.role === 'user' ? 'user' : 'assistant';
-    const content = apiTextParts(msg).join('\n\n');
-    if (!content.trim()) {
-      hiddenOrBlank++;
-      continue;
-    }
+    const textParts = apiTextParts(msg);
+    const content = textParts.join('\n\n');
 
-    // Download this message's attachments (files + pasted images) when asked.
+    // Download this message's attachments (uploaded files, pasted images and
+    // sandbox artifacts) when the popup asked for them. Computed BEFORE the
+    // blank-content check: an image-only message carries no text parts, so a
+    // text-first skip would silently drop its files.
     let attachments: ExtractedAttachment[] | undefined;
     if (options.includeAttachments) {
-      const descriptors = apiMessageAttachments(msg);
-      if (descriptors.length) {
-        attachments = [];
-        for (const descriptor of descriptors) {
-          const { attachment, error } = await downloadChatGptFile(
-            descriptor.fileId,
-            descriptor.filename,
-            descriptor.mimeType,
-            accessToken,
-          );
-          if (attachment) attachments.push(attachment);
-          else attachmentErrors.push(`${descriptor.filename ?? descriptor.fileId}: ${error}`);
-        }
-        if (!attachments.length) attachments = undefined;
+      const fileDescriptors = chatGptAttachmentDescriptors(msg, safeUrls);
+      const sandboxDescriptors = chatGptSandboxDescriptors(textParts);
+      if (fileDescriptors.length || sandboxDescriptors.length) {
+        console.log('[Kontext] chatgpt attachments — msg', msg.id, JSON.stringify({
+          files: fileDescriptors.map(d => ({ id: d.fileId, name: d.originalName, mime: d.mimeType, signed: !!d.signedUrl })),
+          sandbox: sandboxDescriptors.map(s => s.sandboxPath),
+        }));
       }
+
+      const downloaded: ExtractedAttachment[] = [];
+      for (const descriptor of fileDescriptors) {
+        const { attachment, error } = await downloadChatGptFile(descriptor, accessToken);
+        if (attachment) downloaded.push(attachment);
+        else attachmentErrors.push(`${descriptor.originalName ?? descriptor.fileId}: ${error}`);
+      }
+      for (const sandbox of sandboxDescriptors) {
+        const { attachment, error } = await downloadChatGptSandboxFile(
+          sandbox,
+          conversationId,
+          msg.id || node.id,
+          accessToken,
+        );
+        if (attachment) downloaded.push(attachment);
+        else attachmentErrors.push(`${sandbox.originalName ?? sandbox.sandboxPath}: ${error}`);
+      }
+      if (downloaded.length) attachments = downloaded;
+    }
+
+    if (!content.trim() && !attachments) {
+      hiddenOrBlank++;
+      continue;
     }
 
     messages.push({ role, content, messageId: msg.id || node.id, ...(attachments ? { attachments } : {}) });
