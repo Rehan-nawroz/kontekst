@@ -13,7 +13,8 @@ export {};
  * so the API is the source of truth.
  */
 
-import { downloadAttachment } from '../core/attachments';
+import { blobToBase64, finalizeAttachmentName } from '../core/attachments';
+import type { DownloadResult } from '../core/attachments';
 import type { ExtractedAttachment } from '../core/types';
 
 // ──────────────── state ───────────────────────────────────────────────
@@ -330,13 +331,27 @@ function turnContent(turn: Record<string, unknown>): string {
   return parts.join('\n\n');
 }
 
-/* ──────── attachment extraction (FILE fragments → signed_path) ─────────────
+/* ──────── attachment extraction (verified against reference exporter) ──────
  *
- * User uploads arrive in the history payload as fragments carrying a
- * `files: [{ id, file_name, signed_path, is_image }]` array. The signed_path
- * is a site-relative download URL that already embeds an auth signature; the
- * Bearer token is attached as well for safety.
+ * The reference (ai-chat-export-main/deepseek-api.js + deepseek-normalize.js)
+ * and a live payload dump confirm DeepSeek carries uploads in
+ * `fragments[].files[]` with `{ id, file_name, signed_path, is_image }`, where
+ * signed_path is `/file?file_id=…&state=…`. Those bytes do NOT live on the chat
+ * origin — they download from a separate host with cookies EXCLUDED (the
+ * `state=` token is the auth):
+ *
+ *   GET https://files.deepseeksvc.com/api + signed_path + "&ty=" + mode
+ *   mode = is_image ? "p" (webp preview) : "r" (raw bytes)
+ *   credentials: 'omit', referrer: 'https://chat.deepseek.com/'
+ *
+ * Pasted photos are inline markdown `![alt](https://…)` in fragment content and
+ * are fetched from their remote URL, also with credentials omitted.
  * ────────────────────────────────────────────────────────────────────────── */
+
+const DEEPSEEK_FILE_BASE = 'https://files.deepseeksvc.com/api';
+
+/** Match inline markdown images `![alt](https://…)` exactly as the normaliser does. */
+const INLINE_IMAGE_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
 
 interface DeepSeekFragmentFile {
   id?: string | number | null;
@@ -345,30 +360,124 @@ interface DeepSeekFragmentFile {
   is_image?: boolean;
 }
 
-/** Collect downloadable file descriptors from one raw message's fragments. */
-function fragmentFiles(
-  turn: Record<string, unknown>,
-): Array<{ url: string; filename: string | null }> {
-  const out: Array<{ url: string; filename: string | null }> = [];
+/** One downloadable attachment: an uploaded file or a pasted remote photo. */
+interface DeepSeekDownloadTarget {
+  url: string;
+  filename: string | null;
+  isImage: boolean;
+}
+
+/** Collect every downloadable attachment descriptor from one raw message. */
+function fragmentFiles(turn: Record<string, unknown>): DeepSeekDownloadTarget[] {
+  const out: DeepSeekDownloadTarget[] = [];
   const seen = new Set<string>();
   const fragments = Array.isArray(turn.fragments) ? turn.fragments : [];
+
   for (const raw of fragments) {
-    const fragment = raw as { files?: DeepSeekFragmentFile[] } | null;
-    if (!fragment || !Array.isArray(fragment.files)) continue;
-    for (const file of fragment.files) {
-      if (!file?.signed_path) continue;
-      let url: string;
-      try {
-        url = new URL(file.signed_path, location.origin).href;
-      } catch {
-        continue;
+    const fragment = raw as { files?: DeepSeekFragmentFile[]; content?: unknown } | null;
+    if (!fragment) continue;
+
+    // 1. Uploaded files → files.deepseeksvc.com signed path + ty mode.
+    if (Array.isArray(fragment.files)) {
+      for (const file of fragment.files) {
+        const signedPath = String(file?.signed_path || '');
+        if (!signedPath.startsWith('/file?')) continue;
+        const separator = signedPath.includes('?') ? '&' : '?';
+        const mode = file?.is_image ? 'p' : 'r';
+        const url = DEEPSEEK_FILE_BASE + signedPath + separator + 'ty=' + mode;
+        if (seen.has(url)) continue;
+        seen.add(url);
+        out.push({ url, filename: file?.file_name || null, isImage: file?.is_image === true });
       }
-      if (seen.has(url)) continue;
-      seen.add(url);
-      out.push({ url, filename: file.file_name || null });
+    }
+
+    // 2. Pasted photos embedded as inline markdown images in the content.
+    if (typeof fragment.content === 'string' && fragment.content.includes('![')) {
+      INLINE_IMAGE_RE.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = INLINE_IMAGE_RE.exec(fragment.content)) !== null) {
+        const remote = match[2];
+        if (!/^https?:\/\//i.test(remote) || seen.has(remote)) continue;
+        seen.add(remote);
+        out.push({ url: remote, filename: (match[1] || '').trim() || null, isImage: true });
+      }
     }
   }
+
   return out;
+}
+
+/**
+ * Download one DeepSeek attachment. Mirrors the reference: uploaded files hit
+ * files.deepseeksvc.com with credentials omitted; pasted photos come from their
+ * remote URL the same way. Never throws — returns { attachment: null, error }.
+ */
+async function downloadDeepSeekAttachment(
+  target: DeepSeekDownloadTarget,
+): Promise<DownloadResult> {
+  let response: Response;
+  try {
+    response = await fetch(target.url, {
+      method: 'GET',
+      mode: 'cors',
+      credentials: 'omit',
+      referrer: 'https://chat.deepseek.com/',
+    });
+  } catch (err) {
+    return { attachment: null, error: `network error: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!response.ok) return { attachment: null, error: `HTTP ${response.status}` };
+
+  const blob = await response.blob().catch(() => null);
+  if (!blob) return { attachment: null, error: 'body read failed' };
+
+  // ty=p returns a webp preview for images; name it accordingly.
+  let filename = target.filename;
+  if (target.isImage) {
+    filename = filename && /\.[^.]+$/.test(filename)
+      ? filename.replace(/\.[^.]+$/, '.webp')
+      : `${filename || 'image'}.webp`;
+  }
+  const mimeType = blob.type || response.headers.get('content-type') ||
+    (target.isImage ? 'image/webp' : 'application/octet-stream');
+
+  return {
+    attachment: {
+      filename: finalizeAttachmentName(filename, mimeType),
+      mimeType,
+      dataBase64: await blobToBase64(blob),
+    },
+  };
+}
+
+/* ──────── live diagnostics (remove once attachment shape is confirmed) ──── */
+
+/** Log the real shape of the first user turn so a miss can be diagnosed from
+ *  a single console paste instead of guesswork. Only runs during an
+ *  attachment export attempt. */
+function logAttachmentDiagnostics(branch: Array<Record<string, unknown>>): void {
+  try {
+    const firstUser = branch.find(t => String(t?.role ?? '').toUpperCase() === 'USER');
+    if (!firstUser) { console.log('[Kontext] diag: no USER turn found'); return; }
+    const fragments = Array.isArray(firstUser.fragments) ? firstUser.fragments : [];
+    const fragSummary = fragments.slice(0, 6).map((f) => {
+      const rec = (f ?? {}) as Record<string, unknown>;
+      return {
+        type: rec.type,
+        keys: Object.keys(rec),
+        hasFiles: Array.isArray(rec.files) ? rec.files.length : false,
+        fileKeys: Array.isArray(rec.files) && rec.files[0] && typeof rec.files[0] === 'object'
+          ? Object.keys(rec.files[0] as object) : null,
+      };
+    });
+    const found = fragmentFiles(firstUser);
+    console.log('[Kontext] diag — turn keys:', Object.keys(firstUser));
+    console.log('[Kontext] diag — fragments:', JSON.stringify(fragSummary));
+    console.log('[Kontext] diag — scavenged from first user turn:', JSON.stringify(found.map(f => ({ url: f.url, filename: f.filename }))));
+    console.log('[Kontext] diag — first user turn raw:', JSON.stringify(firstUser).slice(0, 2500));
+  } catch (err) {
+    console.log('[Kontext] diag failed:', err);
+  }
 }
 
 async function extractDeepSeekData(
@@ -417,6 +526,11 @@ async function extractDeepSeekData(
   }
 
   const branch = buildBranch(biz?.chat_messages ?? [], session.current_message_id);
+
+  // Diagnostic: dump the real payload shape when attachments were requested,
+  // so a missed attachment can be traced from one console paste.
+  if (options.includeAttachments) logAttachmentDiagnostics(branch);
+
   const messages: Array<{
     role: string;
     content: string;
@@ -438,17 +552,15 @@ async function extractDeepSeekData(
     const content = turnContent(turn);
 
     // User uploads live on the message itself, so a turn with files but no
-    // text still exports its attachments.
+    // text still exports its attachments. Uploads AND pasted photos both come
+    // through fragmentFiles → downloadDeepSeekAttachment (files.deepseeksvc.com).
     let attachments: ExtractedAttachment[] | undefined;
     if (options.includeAttachments && role === 'user') {
       const targets = fragmentFiles(turn);
       if (targets.length) {
         attachments = [];
         for (const target of targets) {
-          const { attachment, error } = await downloadAttachment(target.url, {
-            filename: target.filename,
-            headers: { Authorization: `Bearer ${token}` },
-          });
+          const { attachment, error } = await downloadDeepSeekAttachment(target);
           if (attachment) attachments.push(attachment);
           else attachmentErrors.push(`${target.filename ?? target.url}: ${error}`);
         }
