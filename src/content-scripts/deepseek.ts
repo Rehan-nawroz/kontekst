@@ -13,6 +13,9 @@ export {};
  * so the API is the source of truth.
  */
 
+import { downloadAttachment } from '../core/attachments';
+import type { ExtractedAttachment } from '../core/types';
+
 // ──────────────── state ───────────────────────────────────────────────
 
 const selectedMessageIds = new Set<string>();
@@ -327,8 +330,50 @@ function turnContent(turn: Record<string, unknown>): string {
   return parts.join('\n\n');
 }
 
-/** Fetch the active branch and map it to the popup/background message shape. */
-async function extractDeepSeekData(): Promise<Record<string, unknown>> {
+/* ──────── attachment extraction (FILE fragments → signed_path) ─────────────
+ *
+ * User uploads arrive in the history payload as fragments carrying a
+ * `files: [{ id, file_name, signed_path, is_image }]` array. The signed_path
+ * is a site-relative download URL that already embeds an auth signature; the
+ * Bearer token is attached as well for safety.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+interface DeepSeekFragmentFile {
+  id?: string | number | null;
+  file_name?: string | null;
+  signed_path?: string | null;
+  is_image?: boolean;
+}
+
+/** Collect downloadable file descriptors from one raw message's fragments. */
+function fragmentFiles(
+  turn: Record<string, unknown>,
+): Array<{ url: string; filename: string | null }> {
+  const out: Array<{ url: string; filename: string | null }> = [];
+  const seen = new Set<string>();
+  const fragments = Array.isArray(turn.fragments) ? turn.fragments : [];
+  for (const raw of fragments) {
+    const fragment = raw as { files?: DeepSeekFragmentFile[] } | null;
+    if (!fragment || !Array.isArray(fragment.files)) continue;
+    for (const file of fragment.files) {
+      if (!file?.signed_path) continue;
+      let url: string;
+      try {
+        url = new URL(file.signed_path, location.origin).href;
+      } catch {
+        continue;
+      }
+      if (seen.has(url)) continue;
+      seen.add(url);
+      out.push({ url, filename: file.file_name || null });
+    }
+  }
+  return out;
+}
+
+async function extractDeepSeekData(
+  options: { includeAttachments?: boolean } = {},
+): Promise<Record<string, unknown>> {
   const id = conversationId();
   if (!id) throw new Error('No active DeepSeek conversation (open a /a/chat/s/<id> page).');
   const token = tokenValue();
@@ -372,7 +417,13 @@ async function extractDeepSeekData(): Promise<Record<string, unknown>> {
   }
 
   const branch = buildBranch(biz?.chat_messages ?? [], session.current_message_id);
-  const messages: Array<{ role: string; content: string; messageId: string }> = [];
+  const messages: Array<{
+    role: string;
+    content: string;
+    messageId: string;
+    attachments?: ExtractedAttachment[];
+  }> = [];
+  const attachmentErrors: string[] = [];
   for (const turn of branch) {
     const rawRole = String(turn.role ?? '').toUpperCase();
     if (rawRole !== 'USER' && rawRole !== 'ASSISTANT') continue;
@@ -385,8 +436,28 @@ async function extractDeepSeekData(): Promise<Record<string, unknown>> {
     if (selectAllMode && excludedMessageIds.has(messageId)) continue;
 
     const content = turnContent(turn);
-    if (!content.trim()) continue;
-    messages.push({ role, content, messageId });
+
+    // User uploads live on the message itself, so a turn with files but no
+    // text still exports its attachments.
+    let attachments: ExtractedAttachment[] | undefined;
+    if (options.includeAttachments && role === 'user') {
+      const targets = fragmentFiles(turn);
+      if (targets.length) {
+        attachments = [];
+        for (const target of targets) {
+          const { attachment, error } = await downloadAttachment(target.url, {
+            filename: target.filename,
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (attachment) attachments.push(attachment);
+          else attachmentErrors.push(`${target.filename ?? target.url}: ${error}`);
+        }
+        if (!attachments.length) attachments = undefined;
+      }
+    }
+
+    if (!content.trim() && !attachments) continue;
+    messages.push({ role, content, messageId, ...(attachments ? { attachments } : {}) });
   }
 
   return {
@@ -395,6 +466,7 @@ async function extractDeepSeekData(): Promise<Record<string, unknown>> {
     title: session.title || document.title.replace(/\s*[|–-]\s*DeepSeek.*$/i, ''),
     messages,
     extractedAt: new Date().toISOString(),
+    ...(attachmentErrors.length ? { attachmentErrors } : {}),
   };
 }
 
@@ -472,7 +544,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
   }
 
   if (msg.type === 'kontext:extract') {
-    extractDeepSeekData().then(data => {
+    extractDeepSeekData({ includeAttachments: !!msg.includeAttachments }).then(data => {
       respond({ success: true, data });
     }).catch(error => {
       respond({ success: false, error: error instanceof Error ? error.message : String(error) });
