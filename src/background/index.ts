@@ -27,16 +27,16 @@ function base64ToBytes(b64: string): Uint8Array | null {
 // rather than left alongside the popup.
 //
 // Consequence to be aware of: the popup performs injection + extraction itself and
-// then sends { type: 'kontext:trigger-export' } to this service worker. The
+// then sends { type: 'kontekst:trigger-export' } to this service worker. The
 // chrome.runtime.onMessage listener below handles that message and forwards the
 // extracted data to exportConversation, which builds the Markdown + HTML files,
 // packs them into a ZIP, and starts the download.
 
 // Called by the popup after it extracts the conversation from the content script.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== 'kontext:trigger-export') return;
+  if (message?.type !== 'kontekst:trigger-export') return;
 
-  // The popup already waited for kontext:extract and has the data; re-forward
+  // The popup already waited for kontekst:extract and has the data; re-forward
   // whatever the popup passes so exportConversation stays reusable.
   const data = (message.data ?? {}) as Record<string, unknown>;
   const options = (message.options ?? {}) as ExportOptions;
@@ -158,7 +158,7 @@ async function exportConversation(
   chrome.notifications.create({
     type: 'basic',
     iconUrl: chrome.runtime.getURL('icons/icon128.png'),
-    title: 'Kontext',
+    title: 'KONTEKST',
     message: `${messages.length} messages exported successfully${attachmentNote}!`,
   });
 
@@ -194,7 +194,7 @@ function resolveZipName(data: Record<string, unknown>, options: ExportOptions): 
   if (fromOption) return fromOption;
   const title = typeof data.title === 'string' ? sanitizeZipName(data.title) : '';
   if (title) return title;
-  return `kontext-export-${Date.now()}`;
+  return `kontekst-export-${Date.now()}`;
 }
 
-console.log('Kontext background service worker loaded');
+console.log('KONTEKST background service worker loaded');
