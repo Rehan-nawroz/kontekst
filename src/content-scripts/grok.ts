@@ -306,7 +306,7 @@ function initGrokSelection(): void {
       return true;
     }
 
-    if (msg.type === 'kontext:extract') {
+    if (msg.type === 'kontekst:extract') {
       extractGrokData({ includeAttachments: !!msg.includeAttachments }).then(
         data => respond({ success: true, data }),
         error => respond({
@@ -482,7 +482,7 @@ async function extractGrokData(
       apiTurns = await fetchGrokApiTurns(convId);
       let described = 0;
       for (const turn of apiTurns.values()) described += grokTurnAttachments(turn, convId).length;
-      console.log('[Kontext] grok attachment diag:', JSON.stringify({
+      console.log('[KONTEKST] grok attachment diag:', JSON.stringify({
         conversationId: convId,
         apiTurns: apiTurns.size,
         descriptors: described,
