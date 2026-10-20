@@ -189,7 +189,7 @@ function selectionIndexSnapshot(): Record<string, unknown> {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
-  if (msg.type === 'kontext:get-info') {
+  if (msg.type === 'kontekst:get-info') {
     refreshMounted();
     respond({
       title: document.title.replace(/\s*[|–-]\s*Claude.*$/i, ''),
@@ -198,7 +198,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true;
   }
 
-  if (msg.type === 'kontext:toggle-selection-ui') {
+  if (msg.type === 'kontekst:toggle-selection-ui') {
     enabled = !enabled;
     ensureObserver();
     refreshMounted();
@@ -206,7 +206,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true;
   }
 
-  if (msg.type === 'kontext:select-all') {
+  if (msg.type === 'kontekst:select-all') {
     selectAllMode = true;
     selectedMessageIds.clear();
     excludedMessageIds.clear();
@@ -216,7 +216,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true;
   }
 
-  if (msg.type === 'kontext:select-none') {
+  if (msg.type === 'kontekst:select-none') {
     selectAllMode = false;
     selectedMessageIds.clear();
     excludedMessageIds.clear();
@@ -226,7 +226,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true;
   }
 
-  if (msg.type === 'kontext:get-selection') {
+  if (msg.type === 'kontekst:get-selection') {
     refreshMounted();
     respond({
       selectAll: selectAllMode,
@@ -240,7 +240,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true;
   }
 
-  if (msg.type === 'kontext:reset-after-export') {
+  if (msg.type === 'kontekst:reset-after-export') {
     selectAllMode = true;
     selectedMessageIds.clear();
     excludedMessageIds.clear();
@@ -251,19 +251,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true;
   }
 
-  if (msg.type === 'kontext:get-selection-index-ids') {
+  if (msg.type === 'kontekst:get-selection-index-ids') {
     respond(selectionIndexSnapshot());
     return true;
   }
 
-  if (msg.type === 'kontext:enable-selection-index-watch') {
+  if (msg.type === 'kontekst:enable-selection-index-watch') {
     ensureObserver();
     respond({ ok: true });
     return true;
   }
 
   // Existing extract handler — re-exports as needed.
-  if (msg.type === 'kontext:extract') {
+  if (msg.type === 'kontekst:extract') {
     extractClaudeData({ includeAttachments: !!msg.includeAttachments }).then(data => {
       respond({ success: true, data });
     }).catch(error => {
@@ -502,7 +502,7 @@ async function extractClaudeData(
       organizationId = await discoverClaudeOrganizationId(conversationUuid);
       const branch = await fetchClaudeBranch(conversationUuid, organizationId);
       apiByIndex = branch.map(message => claudeMessageAttachments(message, conversationUuid));
-      console.log('[Kontext] claude attachment diag:', JSON.stringify({
+      console.log('[KONTEKST] claude attachment diag:', JSON.stringify({
         organizationId,
         branchMessages: branch.length,
         domRows: messageRows.length,
@@ -590,7 +590,7 @@ function initClaudeSelection(): void {
   enabled = true;
   ensureObserver();
   refreshMounted();
-  console.log('[Kontext] Claude selection UI active.');
+  console.log('[KONTEKST] Claude selection UI active.');
 }
 
 if (document.readyState === 'loading') {
@@ -599,4 +599,4 @@ if (document.readyState === 'loading') {
   initClaudeSelection();
 }
 
-console.log('[Kontext] Claude content script loaded — DOM selection active.');
+console.log('[KONTEKST] Claude content script loaded — DOM selection active.');
