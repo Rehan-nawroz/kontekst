@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/screenshots/kontext-logo.png" alt="Kontext logo — a K formed from a document, chat bubble, and play arrow" width="120">
+</p>
+
 # Kontext
 
 **Keep the thread. Keep learning.**
@@ -18,6 +22,7 @@ Built for students, self-taught developers, researchers, and anyone who has ever
 
 - [Why Kontext exists](#why-kontext-exists)
 - [What Kontext does](#what-kontext-does)
+- [See it in action](#see-it-in-action)
 - [Supported platforms](#supported-platforms)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -66,6 +71,16 @@ Every student who gets to keep their thread is one more person who can finish th
 - **Attachment folder option** — keep files in `attachments/` instead of the ZIP root.
 - **Automatic platform detection** — Kontext knows which supported site you are on.
 - **Local-only by design** — no account, no server, no analytics, no telemetry.
+
+---
+
+## See it in action
+
+<p align="center">
+  <img src="docs/screenshots/kontext-in-action.png" alt="Kontext export panel open over a DeepSeek study conversation about Newton's law of universal gravitation" width="900">
+</p>
+
+Kontext reads the conversation already open in your browser. Choose your formats and attachment options, then export the active branch and its supported files as one ZIP.
 
 ---
 
@@ -153,6 +168,10 @@ The footer confirms when the export is complete and how many attachments were sa
 ---
 
 ## Export options explained
+
+<p align="center">
+  <img src="docs/screenshots/kontext-popup.png" alt="Kontext popup with export name, user and assistant labels, Markdown and HTML formats, chat link, and attachment options" width="320">
+</p>
 
 | Option | What it does | Default |
 | --- | --- | --- |
@@ -391,7 +410,7 @@ kontekst/
 ├── manifest.json              # Extension manifest (MV3)
 ├── package.json               # Scripts and dependencies
 ├── vite.config.ts             # Build configuration
-├── public/                    # Icons and localized strings
+├── public/                    # Icons, locales, and README screenshots
 ├── src/
 │   ├── background/            # Service worker: rendering, ZIP, downloads
 │   ├── content-scripts/       # Per-platform extraction and page UI
