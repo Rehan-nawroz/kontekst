@@ -458,7 +458,7 @@ async function downloadDeepSeekAttachment(
 function logAttachmentDiagnostics(branch: Array<Record<string, unknown>>): void {
   try {
     const firstUser = branch.find(t => String(t?.role ?? '').toUpperCase() === 'USER');
-    if (!firstUser) { console.log('[Kontext] diag: no USER turn found'); return; }
+    if (!firstUser) { console.log('[KONTEKST] diag: no USER turn found'); return; }
     const fragments = Array.isArray(firstUser.fragments) ? firstUser.fragments : [];
     const fragSummary = fragments.slice(0, 6).map((f) => {
       const rec = (f ?? {}) as Record<string, unknown>;
@@ -471,12 +471,12 @@ function logAttachmentDiagnostics(branch: Array<Record<string, unknown>>): void 
       };
     });
     const found = fragmentFiles(firstUser);
-    console.log('[Kontext] diag — turn keys:', Object.keys(firstUser));
-    console.log('[Kontext] diag — fragments:', JSON.stringify(fragSummary));
-    console.log('[Kontext] diag — scavenged from first user turn:', JSON.stringify(found.map(f => ({ url: f.url, filename: f.filename }))));
-    console.log('[Kontext] diag — first user turn raw:', JSON.stringify(firstUser).slice(0, 2500));
+    console.log('[KONTEKST] diag — turn keys:', Object.keys(firstUser));
+    console.log('[KONTEKST] diag — fragments:', JSON.stringify(fragSummary));
+    console.log('[KONTEKST] diag — scavenged from first user turn:', JSON.stringify(found.map(f => ({ url: f.url, filename: f.filename }))));
+    console.log('[KONTEKST] diag — first user turn raw:', JSON.stringify(firstUser).slice(0, 2500));
   } catch (err) {
-    console.log('[Kontext] diag failed:', err);
+    console.log('[KONTEKST] diag failed:', err);
   }
 }
 
@@ -585,14 +585,14 @@ async function extractDeepSeekData(
 /* ────── message listener ─────────── */
 
 chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
-  if (msg.type === 'kontext:get-info') {
+  if (msg.type === 'kontekst:get-info') {
     collectOrderedIds()
       .then(() => respond({ ...currentState() }))
       .catch(() => respond({ ...currentState() }));
     return true;
   }
 
-  if (msg.type === 'kontext:toggle-selection-ui') {
+  if (msg.type === 'kontekst:toggle-selection-ui') {
     enabled = !enabled;
     ensureObserver();
     collectOrderedIds()
@@ -604,7 +604,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true;
   }
 
-  if (msg.type === 'kontext:select-all') {
+  if (msg.type === 'kontekst:select-all') {
     selectAllMode = true;
     selectedMessageIds.clear();
     excludedMessageIds.clear();
@@ -614,7 +614,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true;
   }
 
-  if (msg.type === 'kontext:select-none') {
+  if (msg.type === 'kontekst:select-none') {
     selectAllMode = false;
     selectedMessageIds.clear();
     excludedMessageIds.clear();
@@ -624,14 +624,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true;
   }
 
-  if (msg.type === 'kontext:get-selection') {
+  if (msg.type === 'kontekst:get-selection') {
     collectOrderedIds()
       .then(() => respond(selectionSnapshot()))
       .catch(() => respond(selectionSnapshot()));
     return true;
   }
 
-  if (msg.type === 'kontext:reset-after-export') {
+  if (msg.type === 'kontekst:reset-after-export') {
     selectAllMode = true;
     selectedMessageIds.clear();
     excludedMessageIds.clear();
@@ -642,20 +642,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true;
   }
 
-  if (msg.type === 'kontext:get-selection-index-ids') {
+  if (msg.type === 'kontekst:get-selection-index-ids') {
     collectOrderedIds()
       .then(() => respond({ conversationId: conversationId(), ids: [...orderedIds], temporaryIds: [] }))
       .catch(() => respond({ conversationId: conversationId(), ids: [], temporaryIds: [] }));
     return true;
   }
 
-  if (msg.type === 'kontext:enable-selection-index-watch') {
+  if (msg.type === 'kontekst:enable-selection-index-watch') {
     ensureObserver();
     respond({ ok: true });
     return true;
   }
 
-  if (msg.type === 'kontext:extract') {
+  if (msg.type === 'kontekst:extract') {
     extractDeepSeekData({ includeAttachments: !!msg.includeAttachments }).then(data => {
       respond({ success: true, data });
     }).catch(error => {
@@ -675,7 +675,7 @@ function initDeepSeekSelection(): void {
   collectOrderedIds()
     .catch(() => [] as string[])
     .then(() => refreshMounted());
-  console.log('[Kontext] DeepSeek selection UI active.');
+  console.log('[KONTEKST] DeepSeek selection UI active.');
 }
 
 if (document.readyState === 'loading') {
@@ -684,4 +684,4 @@ if (document.readyState === 'loading') {
   initDeepSeekSelection();
 }
 
-console.log('[Kontext] DeepSeek content script loaded.');
+console.log('[KONTEKST] DeepSeek content script loaded.');
