@@ -1,6 +1,6 @@
 # Third-party notices
 
-Kontext’s provider-specific attachment extraction was informed by and adapted
+KONTEKST’s provider-specific attachment extraction was informed by and adapted
 from the open-source **AI Chat Export** project by Alexey Sirotin.
 
 ## AI Chat Export
