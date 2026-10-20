@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/screenshots/kontext-logo.png" alt="Kontext logo — a K formed from a document, chat bubble, and play arrow" width="120">
+  <img src="docs/screenshots/kontekst-logo.png" alt="KONTEKST logo — a K formed from a document, chat bubble, and play arrow" width="120">
 </p>
 
-# Kontext
+# KONTEKST
 
 **Keep the thread. Keep learning.**
 
-Kontext is a free, open-source browser extension that turns your AI study sessions into portable Markdown and HTML archives — with optional copies of the files and images you shared — so you can continue learning on another platform when a free limit runs out.
+KONTEKST is a free, open-source browser extension that turns your AI study sessions into portable Markdown and HTML archives — with optional copies of the files and images you shared — so you can continue learning on another platform when a free limit runs out.
 
 Built for students, self-taught developers, researchers, and anyone who has ever been three hours into a problem when the message appeared:
 
@@ -14,14 +14,14 @@ Built for students, self-taught developers, researchers, and anyone who has ever
 
 **Version 0.1.0 · Manifest V3 · Chromium (Chrome, Edge, Brave) · Local-only**
 
-**Open-source foundation:** Kontext’s provider-specific attachment extraction is adapted from the open-source [AI Chat Export](https://github.com/alexey-sirotin/ai-chat-export) project by Alexey Sirotin. The MIT notice is preserved in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+**Open-source foundation:** KONTEKST’s provider-specific attachment extraction is adapted from the open-source [AI Chat Export](https://github.com/alexey-sirotin/ai-chat-export) project by Alexey Sirotin. The MIT notice is preserved in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
 ## Contents
 
-- [Why Kontext exists](#why-kontext-exists)
-- [What Kontext does](#what-kontext-does)
+- [Why KONTEKST exists](#why-kontekst-exists)
+- [What KONTEKST does](#what-kontekst-does)
 - [See it in action](#see-it-in-action)
 - [Supported platforms](#supported-platforms)
 - [Requirements](#requirements)
@@ -37,12 +37,13 @@ Built for students, self-taught developers, researchers, and anyone who has ever
 - [Current limitations and roadmap](#current-limitations-and-roadmap)
 - [Development](#development)
 - [Project structure](#project-structure)
+- [AI tools and open-source attribution](#ai-tools-and-open-source-attribution)
 - [Contributing](#contributing)
 - [License](#license)
 
 ---
 
-## Why Kontext exists
+## Why KONTEKST exists
 
 Every student knows the moment. You are deep in a long session — working through a proof, debugging a program, preparing for an exam, or trying to understand one stubborn paragraph. The conversation has become your notebook: definitions, corrections, examples, half-finished ideas. Then the platform stops you.
 
@@ -50,17 +51,17 @@ Not because you are finished. Not because you have learned enough. Because a usa
 
 The reset timer is not the worst part. The worst part is losing the thread. Starting again on another platform means re-explaining the assignment, re-pasting the notes, re-teaching the AI what you already know — time and energy that should have gone into learning.
 
-**Kontext was built for that moment.**
+**KONTEKST was built for that moment.**
 
 It exports the conversation you are viewing — the messages, the uploaded PDFs, the diagrams, the code-interpreter files — into a ZIP you own. Open a new session on another AI platform, bring the archive with you, and continue from where you stopped. Your context travels with you, even when the meter does not.
 
-We believe a student’s curiosity should never be capped by an hourly limit. Kontext does not bypass limits, share accounts, or break platform rules. It does something simpler and more durable: it makes your own study record portable. A limit becomes a pause, not an ending.
+We believe a student’s curiosity should never be capped by an hourly limit. KONTEKST does not bypass limits, share accounts, or break platform rules. It does something simpler and more durable: it makes your own study record portable. A limit becomes a pause, not an ending.
 
 Every student who gets to keep their thread is one more person who can finish the assignment, pass the exam, or build the thing they dreamed of. That is the future we want to help write — one uninterrupted lesson at a time.
 
 ---
 
-## What Kontext does
+## What KONTEKST does
 
 - **One-click export** from ChatGPT, Claude, Grok, and DeepSeek.
 - **Two formats** — clean Markdown (`conversation.md`) and a styled HTML page (`conversation.html`) that opens without a build step.
@@ -69,7 +70,7 @@ Every student who gets to keep their thread is one more person who can finish th
 - **Custom labels** — rename “User” and “Assistant” to match your workflow.
 - **Original chat link** — optionally keep a link back to the source conversation.
 - **Attachment folder option** — keep files in `attachments/` instead of the ZIP root.
-- **Automatic platform detection** — Kontext knows which supported site you are on.
+- **Automatic platform detection** — KONTEKST knows which supported site you are on.
 - **Local-only by design** — no account, no server, no analytics, no telemetry.
 
 ---
@@ -77,10 +78,10 @@ Every student who gets to keep their thread is one more person who can finish th
 ## See it in action
 
 <p align="center">
-  <img src="docs/screenshots/kontext-in-action.png" alt="Kontext export panel open over a DeepSeek study conversation about Newton's law of universal gravitation" width="900">
+  <img src="docs/screenshots/kontekst-in-action.png" alt="KONTEKST export panel open over a DeepSeek study conversation about Newton's law of universal gravitation" width="900">
 </p>
 
-Kontext reads the conversation already open in your browser. Choose your formats and attachment options, then export the active branch and its supported files as one ZIP.
+KONTEKST reads the conversation already open in your browser. Choose your formats and attachment options, then export the active branch and its supported files as one ZIP.
 
 ---
 
@@ -93,7 +94,7 @@ Kontext reads the conversation already open in your browser. Choose your formats
 | **Grok** | `grok.com` | Active conversation branch, user assets, generated and search images, rendered files |
 | **DeepSeek** | `chat.deepseek.com` | Active conversation branch, uploaded files, inline images |
 
-Kontext exports the conversation you are currently viewing. It does not download your entire account history.
+KONTEKST exports the conversation you are currently viewing. It does not download your entire account history.
 
 ---
 
@@ -103,13 +104,13 @@ Kontext exports the conversation you are currently viewing. It does not download
 - **Node.js 18+** and **npm** — only needed to build the extension from source.
 - An account on at least one supported platform, already signed in in your browser.
 
-Kontext is not available on Firefox or Safari, and it is not a mobile app.
+KONTEKST is not available on Firefox or Safari, and it is not a mobile app.
 
 ---
 
 ## Installation
 
-Kontext currently installs as an **unpacked extension** from source.
+KONTEKST currently installs as an **unpacked extension** from source.
 
 ### 1. Get the code
 
@@ -133,11 +134,11 @@ The production build is written to `dist/`.
 2. Turn on **Developer mode**.
 3. Click **Load unpacked**.
 4. Select the **`dist`** folder — not the project root.
-5. Pin **Kontext** to your toolbar for one-click access.
+5. Pin **KONTEKST** to your toolbar for one-click access.
 
 ### 4. Refresh open tabs
 
-After installing or reloading the extension, refresh any ChatGPT, Claude, Grok, or DeepSeek tab that was already open. Content scripts are injected when the page loads; a refresh makes sure the current tab can talk to Kontext.
+After installing or reloading the extension, refresh any ChatGPT, Claude, Grok, or DeepSeek tab that was already open. Content scripts are injected when the page loads; a refresh makes sure the current tab can talk to KONTEKST.
 
 ### Updating
 
@@ -147,14 +148,14 @@ npm install
 npm run build
 ```
 
-Then open `chrome://extensions`, click the **Reload** button on Kontext, and refresh the chat tab.
+Then open `chrome://extensions`, click the **Reload** button on KONTEKST, and refresh the chat tab.
 
 ---
 
 ## Quick start
 
 1. **Open a conversation** on ChatGPT, Claude, Grok, or DeepSeek.
-2. **Click the Kontext icon** in your toolbar.
+2. **Click the KONTEKST icon** in your toolbar.
 3. **Choose a name** for the export (optional — the conversation title is used by default).
 4. **Pick your formats** — Markdown, HTML, or both.
 5. **Turn on “Save attachments”** if you want the uploaded PDFs, images, and generated files included.
@@ -170,12 +171,12 @@ The footer confirms when the export is complete and how many attachments were sa
 ## Export options explained
 
 <p align="center">
-  <img src="docs/screenshots/kontext-popup.png" alt="Kontext popup with export name, user and assistant labels, Markdown and HTML formats, chat link, and attachment options" width="320">
+  <img src="docs/screenshots/kontekst-popup.png" alt="KONTEKST popup with export name, user and assistant labels, Markdown and HTML formats, chat link, and attachment options" width="320">
 </p>
 
 | Option | What it does | Default |
 | --- | --- | --- |
-| **Export name** | Base name of the ZIP file. Invalid filename characters are removed automatically. | Conversation title, or `kontext-export-<timestamp>` |
+| **Export name** | Base name of the ZIP file. Invalid filename characters are removed automatically. | Conversation title, or `kontekst-export-<timestamp>` |
 | **User** | Label printed for your messages in the transcript. | `User` |
 | **Assistant** | Label printed for the AI’s messages. | `Assistant` |
 | **Markdown** | Adds `conversation.md` to the archive. | On |
@@ -218,7 +219,7 @@ Filename collisions are handled automatically (`image.png`, `image (2).png`), an
 
 ## Continuing on another AI platform
 
-This is the workflow Kontext was designed for.
+This is the workflow KONTEKST was designed for.
 
 1. **Export** the conversation before you close the tab — or as soon as you see the limit approaching.
 2. **Unzip** the archive somewhere you can find it.
@@ -249,7 +250,7 @@ Transcript:
 
 ## Your study archive
 
-Kontext is also a simple way to build a personal learning archive.
+KONTEKST is also a simple way to build a personal learning archive.
 
 - One folder per course or project.
 - Name exports by topic, not by date: `linear-algebra-eigenvectors.zip`.
@@ -263,9 +264,9 @@ Over a semester, that archive becomes a record of how you learned — and a reso
 
 ## Privacy and permissions
 
-**Kontext has no backend.** It does not create an account, collect analytics, or send your conversations to a server operated by this project. Everything happens inside your browser.
+**KONTEKST has no backend.** It does not create an account, collect analytics, or send your conversations to a server operated by this project. Everything happens inside your browser.
 
-When you export, Kontext reads the conversation through the platform’s own API using the session you are already signed in with, then packages the result locally and hands it to your browser’s download manager.
+When you export, KONTEKST reads the conversation through the platform’s own API using the session you are already signed in with, then packages the result locally and hands it to your browser’s download manager.
 
 ### Why each permission is needed
 
@@ -276,9 +277,9 @@ When you export, Kontext reads the conversation through the platform’s own API
 | `downloads` | Save the finished ZIP to your computer. |
 | `scripting` | Run the exporter on supported chat pages. |
 | `notifications` | Tell you when an export finishes or when attachments could not be downloaded. |
-| Host permissions for `chatgpt.com`, `claude.ai`, `grok.com`, `chat.deepseek.com` | Read the conversation only on those four sites. Kontext is not active anywhere else. |
+| Host permissions for `chatgpt.com`, `claude.ai`, `grok.com`, `chat.deepseek.com` | Read the conversation only on those four sites. KONTEKST is not active anywhere else. |
 
-### What Kontext does not do
+### What KONTEKST does not do
 
 - It does not upload your data to this project or any third party.
 - It does not store your passwords or session tokens.
@@ -302,19 +303,19 @@ Your exports are ordinary files on your computer. Treat them like any other stud
 | **The ZIP is empty or incomplete** | Keep the chat tab open until the export finishes, then check the completion notification. |
 | **HTML opens but looks plain** | `conversation.html` uses system fonts and includes its own styles. Image links that were already part of the conversation may still point to their original hosts. |
 
-If a problem persists, open an issue with the platform, the browser version, and the exact message shown by Kontext. Do not paste private conversation content into a public issue.
+If a problem persists, open an issue with the platform, the browser version, and the exact message shown by KONTEKST. Do not paste private conversation content into a public issue.
 
 ---
 
 ## FAQ
 
-**Does Kontext bypass free limits?**  
+**Does KONTEKST bypass free limits?**  
 No. It does not change, reset, or evade any platform’s limits. It preserves the work you have already done so you can continue elsewhere.
 
 **Is my conversation uploaded anywhere?**  
-No. Kontext runs locally in your browser and saves a ZIP to your computer.
+No. KONTEKST runs locally in your browser and saves a ZIP to your computer.
 
-**Does Kontext store my login?**  
+**Does KONTEKST store my login?**  
 No. It uses the session your browser already has with each platform, only while you are on that platform.
 
 **Does it export my whole account history?**  
@@ -327,7 +328,7 @@ DeepSeek respects the checkboxes shown beside messages. On ChatGPT, Claude, and 
 Yes. Markdown and HTML are plain text formats. Open them in any editor, annotate them, or combine them with your own notes.
 
 **Does it work on mobile?**  
-No. Kontext is a desktop Chromium extension.
+No. KONTEKST is a desktop Chromium extension.
 
 **Does it work on Firefox or Safari?**  
 Not currently.
@@ -338,27 +339,27 @@ It is best to export from the signed-in conversation view. Shared views may omit
 **Are attachments embedded inside the Markdown file?**  
 Attachments are saved as separate files in the ZIP. The transcript remains readable on its own.
 
-**Does Kontext create PDFs?**  
+**Does KONTEKST create PDFs?**  
 No. It exports Markdown and HTML. PDFs and other documents you uploaded to the chat can be included as attachments in the ZIP.
 
-**Is Kontext free?**  
+**Is KONTEKST free?**  
 Yes. It is open source under the Apache License 2.0.
 
-**Is Kontext affiliated with OpenAI, Anthropic, xAI, or DeepSeek?**  
-No. Kontext is an independent project and is not endorsed by or affiliated with any of these companies.
+**Is KONTEKST affiliated with OpenAI, Anthropic, xAI, or DeepSeek?**  
+No. KONTEKST is an independent project and is not endorsed by or affiliated with any of these companies.
 
 ---
 
 ## Current limitations and roadmap
 
-Kontext is at version **0.1.0**. It is honest about what still needs work:
+KONTEKST is at version **0.1.0**. It is honest about what still needs work:
 
 - **Selective export** — DeepSeek honors the page checkboxes; ChatGPT, Claude, and Grok currently export the active conversation branch. Unified per-message selection is on the roadmap.
 - **Provider attachment coverage** — each platform exposes files differently. Some upload types, expired files, and protected third-party images may be skipped.
 - **Platform changes** — ChatGPT, Claude, Grok, and DeepSeek change their internal APIs and page structure regularly. Updates may be required when they do.
 - **Large archives** — exports are assembled in the browser. Very large attachments can take time; keep the tab open until the notification appears.
 - **Chromium only** — Firefox and Safari are not supported yet.
-- **Store listing** — Kontext currently installs from source as an unpacked extension.
+- **Store listing** — KONTEKST currently installs from source as an unpacked extension.
 
 Roadmap priorities: reliable per-message selection, broader attachment coverage, a packaged release, and automated regression tests for every provider.
 
@@ -423,6 +424,13 @@ kontekst/
 
 ---
 
+## AI tools and open-source attribution
+
+KONTEKST was built in October 2026 for the STEM2Connect AI Hackathon, whose rules require teams to disclose AI assistance and credit open-source code. Both are listed here, and repeated in our Devpost submission.
+
+**AI coding assistant — freebuff.** freebuff, an AI coding agent, was used across the whole build: drafting and refactoring the TypeScript platform extractors, the shared attachment pipeline, the ZIP builder, the Markdown/HTML renderers, and the Preact popup UI; generating the Vite/Manifest V3 build setup; and drafting and editing this README. Every AI-generated change was reviewed, corrected, and integrated by the team — nothing was merged unreviewed, and the team is responsible for the result.
+---
+
 ## Contributing
 
 Contributions, bug reports, and platform fixes are welcome.
@@ -441,10 +449,10 @@ If a platform changes its internals, a small, well-scoped patch with a clear bef
 
 ## License
 
-Kontext is released under the **Apache License 2.0**. See [LICENSE](LICENSE) for the full text.
+KONTEKST is released under the **Apache License 2.0**. See [LICENSE](LICENSE) for the full text.
 
 Third-party notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
-**Kontext — because a study session should end when you are finished, not when a meter says so.**
+**KONTEKST — because a study session should end when you are finished, not when a meter says so.**
