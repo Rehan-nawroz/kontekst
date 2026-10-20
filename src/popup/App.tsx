@@ -88,7 +88,7 @@ export function App() {
       // hosts; the extractor answers with { success, data } (or { error }).
       // includeAttachments tells it to also download the chat's files/images.
       const result = (await chrome.tabs.sendMessage(tab.id, {
-        type: 'kontext:extract',
+        type: 'kontekst:extract',
         includeAttachments: saveAttachments,
       })) as MessageData;
 
@@ -111,7 +111,7 @@ export function App() {
       // Forward data + options to the background and wait for the reply so
       // success is only shown once the download actually started.
       const exportReply = (await chrome.runtime.sendMessage({
-        type: 'kontext:trigger-export',
+        type: 'kontekst:trigger-export',
         data: result.data,
         options,
       })) as { ok?: boolean; error?: string; attachmentCount?: number } | undefined;
@@ -139,7 +139,7 @@ export function App() {
   const footerText = statusKind === 'idle' ? HINT : status;
 
   return (
-    <div class="kontext-app">
+    <div class="kontekst-app">
       <header class="app-header">
         <h1 class="wordmark">
           <span class="wordmark-white">KON</span>
