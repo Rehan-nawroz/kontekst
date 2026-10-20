@@ -241,7 +241,7 @@ export function getSelectedMessages(): Set<string> {
 /* ──────────── load listener (runs on DOMContentLoaded via manifest) ══ */
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === 'kontext:extract') {
+  if (message?.type === 'kontekst:extract') {
     extractChatGPTData({ includeAttachments: !!message.includeAttachments }).then(data => {
       sendResponse({ success: true, data });
     }).catch(err => {
@@ -249,12 +249,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
     return true; // async response.
   }
-  if (message?.type === 'kontext:init-selection') {
+  if (message?.type === 'kontekst:init-selection') {
     initChatGptSelection?.();
     sendResponse({ success: true });
     return true;
   }
-  if (message?.type === 'kontext:destroy-selection') {
+  if (message?.type === 'kontekst:destroy-selection') {
     destroyChatGptSelection?.();
     sendResponse({ success: true });
     return true;
@@ -664,7 +664,7 @@ async function extractChatGPTData(
       const fileDescriptors = chatGptAttachmentDescriptors(msg, safeUrls);
       const sandboxDescriptors = chatGptSandboxDescriptors(textParts);
       if (fileDescriptors.length || sandboxDescriptors.length) {
-        console.log('[Kontext] chatgpt attachments — msg', msg.id, JSON.stringify({
+        console.log('[KONTEKST] chatgpt attachments — msg', msg.id, JSON.stringify({
           files: fileDescriptors.map(d => ({ id: d.fileId, name: d.originalName, mime: d.mimeType, signed: !!d.signedUrl })),
           sandbox: sandboxDescriptors.map(s => s.sandboxPath),
         }));
@@ -724,4 +724,4 @@ if (document.readyState === 'loading') {
   initChatGptSelection();
 }
 
-console.log('[Kontext] ChatGPT content script loaded — selection UI active.');
+console.log('[KONTEKST] ChatGPT content script loaded — selection UI active.');
